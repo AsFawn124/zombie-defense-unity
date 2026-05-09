@@ -1,0 +1,22 @@
+#!/bin/bash
+# 僵尸防线 GitHub推送命令
+# 复制以下命令到本地终端执行
+
+# 进入项目目录
+cd /home/appops/workspace/unity-td-shooter
+
+# 确保在main分支
+git branch -M main
+
+# 添加远程仓库（如果还没有添加）
+git remote add origin https://github.com/AsFawn124/zombie-defense-unity.git
+
+# 推送到GitHub
+git push -u origin main
+
+# 执行后会提示输入用户名和密码
+# 用户名: AsFawn124
+# 密码: 你的GitHub个人访问令牌(PAT)
+
+# 如果没有PAT，请访问 https://github.com/settings/tokens 创建
+# 勾选 repo 权限
