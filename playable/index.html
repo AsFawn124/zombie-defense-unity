@@ -1,0 +1,2908 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>僵尸防线 - Zombie Defense TD</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0a0a0a;overflow:hidden;font-family:'Microsoft YaHei',sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;}
+canvas{display:block;margin:0 auto;cursor:crosshair;}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+// ZOMBIE DEFENSE: TOWER DEFENSE + ROGUELIKE
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ============================================================
+// GAME STATES
+// ============================================================
+const GS = { MENU:0, LEVEL_SELECT:1, PLAYING:2, PAUSED:3, SKILL_SELECT:4, GAME_OVER:5, VICTORY:6 };
+let gameState = GS.MENU;
+let currentLevel = 0; // 0=city, 1=desert, 2=hell
+
+// ============================================================
+// AUDIO SYSTEM
+// ============================================================
+let audioCtx = null;
+function initAudio(){ if(!audioCtx){ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } }
+function playSound(freq,type,duration,vol=0.1,slide=0){
+  if(!audioCtx) return;
+  try{
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if(slide) osc.frequency.linearRampToValueAtTime(freq+slide, t+duration);
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t+duration);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(t); osc.stop(t+duration);
+  }catch(e){}
+}
+function sfxShoot(){ playSound(800,'square',0.08,0.05,-400); }
+function sfxIceShoot(){ playSound(1200,'sine',0.1,0.04,-600); }
+function sfxFireShoot(){ playSound(200,'sawtooth',0.15,0.06,100); }
+function sfxLightning(){ playSound(3000,'sawtooth',0.1,0.04,-2000); }
+function sfxPoisonShoot(){ playSound(400,'triangle',0.1,0.08,-100); }
+function sfxExplosion(){ playSound(60,'square',0.3,0.15,-40); }
+function sfxBossSpawn(){ playSound(40,'sawtooth',0.5,0.3,20); }
+function sfxWaveComplete(){
+  playSound(523,'sine',0.15,0.08); setTimeout(()=>playSound(659,'sine',0.15,0.08),100);
+  setTimeout(()=>playSound(784,'sine',0.2,0.12),200);
+}
+function sfxPlace(){ playSound(600,'sine',0.08,0.06,200); }
+function sfxUpgrade(){ playSound(1000,'sine',0.1,0.06); setTimeout(()=>playSound(1500,'sine',0.1,0.06),80); }
+function sfxClick(){ playSound(440,'sine',0.05,0.04); }
+function sfxDamage(){ playSound(150,'square',0.06,0.05,-50); }
+function sfxGameOver(){ playSound(80,'sawtooth',0.6,0.4,-40); }
+function sfxVictory(){
+  [523,659,784,1047].forEach((f,i)=>setTimeout(()=>playSound(f,'sine',0.2,0.1),i*150));
+}
+// 🆕 New sound effects
+function sfxHeroAttack(){ playSound(600,'square',0.06,0.04,-200); }
+function sfxHeroFrost(){ playSound(1400,'sine',0.08,0.05,-800); }
+function sfxHeroExplosion(){ playSound(50,'sawtooth',0.2,0.1,30); }
+function sfxHeroHeal(){ playSound(300,'sine',0.1,0.12,200); }
+function sfxItemDrop(){ playSound(800,'sine',0.06,0.08,400); }
+function sfxItemPickup(){ playSound(1200,'sine',0.08,0.06); setTimeout(()=>playSound(1600,'sine',0.08,0.06),60); }
+function sfxAirstrike(){ playSound(40,'sawtooth',0.5,0.3,-20); setTimeout(()=>playSound(30,'square',0.6,0.2,-10),150); }
+function sfxBlizzard(){ playSound(200,'sine',0.15,0.5,-50); setTimeout(()=>playSound(150,'sawtooth',0.2,0.4,-30),100); }
+function sfxGoldenTime(){ playSound(1000,'sine',0.08,0.1,300); setTimeout(()=>playSound(1500,'sine',0.08,0.1,200),120); }
+function sfxShield(){ playSound(400,'sine',0.1,0.15,100); setTimeout(()=>playSound(600,'sine',0.1,0.1,200),150); }
+function sfxFreezeBomb(){ playSound(800,'sine',0.12,0.15,-400); }
+function sfxAchievement(){
+  [523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>playSound(f,'sine',0.15,0.08),i*80));
+}
+function sfxWaveTransition(){ playSound(200,'sawtooth',0.15,0.2,100); }
+
+// ============================================================
+// SAVE SYSTEM
+// ============================================================
+const SAVE_KEY = 'zombieDefense_save';
+function loadSave(){
+  try{
+    const d = JSON.parse(localStorage.getItem(SAVE_KEY));
+    return d || { scores:[0,0,0], waves:[0,0,0], completed:[false,false,false] };
+  }catch(e){ return { scores:[0,0,0], waves:[0,0,0], completed:[false,false,false] }; }
+}
+function saveSave(data){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }catch(e){} }
+let saveData = loadSave();
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+function resizeCanvas(){
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const aspect = 16/10;
+  let cw, ch;
+  if(w/h > aspect){ ch = h; cw = ch * aspect; }
+  else { cw = w; ch = cw / aspect; }
+  canvas.width = cw;
+  canvas.height = ch;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+let scale = 1;
+let offsetX = 0, offsetY = 0;
+
+// ============================================================
+// GRID & MAP CONSTANTS
+// ============================================================
+const GRID_COLS = 16;
+const GRID_ROWS = 12;
+let CELL_SIZE = 40;
+let MAP_X = 0, MAP_Y = 0;
+
+// ============================================================
+// LEVEL DEFINITIONS
+// ============================================================
+const levelDefs = [
+  {
+    name:'城市街区', icon:'🏙️', desc:'僵尸入侵城市！在街道间布置防线',
+    difficulty:'简单', diffColor:'#4caf50', bgColor:'#1a1a2e',
+    path: [
+      {x:0,y:2},{x:1,y:2},{x:2,y:2},{x:3,y:2},{x:3,y:3},{x:3,y:4},{x:3,y:5},
+      {x:4,y:5},{x:5,y:5},{x:6,y:5},{x:6,y:4},{x:6,y:3},{x:6,y:2},
+      {x:7,y:2},{x:8,y:2},{x:9,y:2},{x:9,y:3},{x:9,y:4},{x:9,y:5},
+      {x:10,y:5},{x:11,y:5},{x:12,y:5},{x:12,y:6},{x:12,y:7},{x:12,y:8},
+      {x:13,y:8},{x:14,y:8},{x:15,y:8}
+    ],
+    hpMult:1.0, spdMult:1.0, goldMult:1.0
+  },
+  {
+    name:'沙漠基地', icon:'🏜️', desc:'沙漠中的军事前哨，守住最后防线',
+    difficulty:'中等', diffColor:'#ff9800', bgColor:'#2e1a0a',
+    path: [
+      {x:0,y:6},{x:1,y:6},{x:2,y:6},{x:2,y:5},{x:2,y:4},{x:2,y:3},{x:2,y:2},
+      {x:3,y:2},{x:4,y:2},{x:5,y:2},{x:5,y:3},{x:5,y:4},{x:5,y:5},{x:5,y:6},{x:5,y:7},{x:5,y:8},{x:5,y:9},
+      {x:6,y:9},{x:7,y:9},{x:8,y:9},{x:8,y:8},{x:8,y:7},{x:8,y:6},{x:8,y:5},{x:8,y:4},
+      {x:9,y:4},{x:10,y:4},{x:11,y:4},{x:11,y:5},{x:11,y:6},{x:11,y:7},
+      {x:12,y:7},{x:13,y:7},{x:14,y:7},{x:14,y:8},{x:14,y:9},{x:14,y:10},
+      {x:15,y:10}
+    ],
+    hpMult:1.3, spdMult:1.1, goldMult:1.2
+  },
+  {
+    name:'地狱堡垒', icon:'💀', desc:'地狱深处，恶魔与僵尸的巢穴',
+    difficulty:'困难', diffColor:'#f44336', bgColor:'#1a0000',
+    path: [
+      {x:0,y:1},{x:1,y:1},{x:2,y:1},{x:3,y:1},{x:3,y:2},{x:3,y:3},{x:3,y:4},
+      {x:2,y:4},{x:1,y:4},{x:1,y:5},{x:1,y:6},{x:1,y:7},{x:1,y:8},
+      {x:2,y:8},{x:3,y:8},{x:4,y:8},{x:5,y:8},{x:5,y:7},{x:5,y:6},{x:5,y:5},
+      {x:6,y:5},{x:7,y:5},{x:8,y:5},{x:8,y:4},{x:8,y:3},{x:8,y:2},
+      {x:9,y:2},{x:10,y:2},{x:11,y:2},{x:11,y:3},{x:11,y:4},{x:11,y:5},{x:11,y:6},
+      {x:12,y:6},{x:13,y:6},{x:13,y:7},{x:13,y:8},{x:13,y:9},{x:13,y:10},
+      {x:14,y:10},{x:15,y:10}
+    ],
+    hpMult:1.6, spdMult:1.2, goldMult:1.5
+  }
+];
+
+// ============================================================
+// TOWER DEFINITIONS
+// ============================================================
+const TOWER_TYPES = [
+  { name:'机枪塔', icon:'🔫', desc:'基础攻击', color:'#aaa', bulletColor:'#ffdd57', cost:50,
+    damage:15, range:3, fireRate:60, bulletSpeed:8,
+    upgrades:[
+      {dmgMul:1.5, rangeAdd:0, rateMul:0.85, cost:40},
+      {dmgMul:2.0, rangeAdd:0.5, rateMul:0.7, cost:80},
+      {dmgMul:3.0, rangeAdd:1, rateMul:0.55, cost:150}
+    ]
+  },
+  { name:'冰霜塔', icon:'❄️', desc:'减速敌人', color:'#5cb8ff', bulletColor:'#88ccff', cost:75,
+    damage:8, range:2.5, fireRate:50, bulletSpeed:7,
+    slowAmount:0.4, slowDuration:120,
+    upgrades:[
+      {dmgMul:1.4, slowMul:1.3, rangeAdd:0.5, rateMul:0.9, cost:50},
+      {dmgMul:2.0, slowMul:1.6, rangeAdd:0.5, rateMul:0.8, cost:100},
+      {dmgMul:3.0, slowMul:2.0, rangeAdd:1, rateMul:0.7, cost:180}
+    ]
+  },
+  { name:'火焰塔', icon:'🔥', desc:'AOE灼烧', color:'#ff6644', bulletColor:'#ff4400', cost:100,
+    damage:20, range:2.5, fireRate:55, bulletSpeed:6,
+    burnDamage:8, burnDuration:90,
+    upgrades:[
+      {dmgMul:1.5, burnMul:1.5, rangeAdd:0.5, rateMul:0.9, cost:70},
+      {dmgMul:2.2, burnMul:2.0, rangeAdd:0.5, rateMul:0.8, cost:140},
+      {dmgMul:3.5, burnMul:3.0, rangeAdd:1, rateMul:0.65, cost:250}
+    ]
+  },
+  { name:'闪电塔', icon:'⚡', desc:'连锁闪电', color:'#ffdd00', bulletColor:'#ffff00', cost:125,
+    damage:25, range:3, fireRate:40, bulletSpeed:12,
+    chainCount:3, chainRange:2.5,
+    upgrades:[
+      {dmgMul:1.4, chainAdd:1, rangeAdd:0.5, rateMul:0.9, cost:90},
+      {dmgMul:2.0, chainAdd:2, rangeAdd:0.5, rateMul:0.8, cost:170},
+      {dmgMul:3.0, chainAdd:3, rangeAdd:1, rateMul:0.7, cost:300}
+    ]
+  },
+  { name:'毒素塔', icon:'☠️', desc:'持续毒伤', color:'#66ff66', bulletColor:'#00ff00', cost:80,
+    damage:5, range:3, fireRate:45, bulletSpeed:7,
+    poisonDamage:12, poisonDuration:150,
+    upgrades:[
+      {dmgMul:1.5, poisonMul:1.5, rangeAdd:0.5, rateMul:0.9, cost:55},
+      {dmgMul:2.2, poisonMul:2.2, rangeAdd:0.5, rateMul:0.8, cost:110},
+      {dmgMul:3.5, poisonMul:3.5, rangeAdd:1, rateMul:0.65, cost:200}
+    ]
+  }
+];
+
+// ============================================================
+// SKILL DEFINITIONS
+// ============================================================
+const ALL_SKILLS = [
+  { id:'power', name:'火力强化', desc:'所有塔攻击力 +20%', icon:'💪', rarity:'common', color:'#fff', effect:{atkMul:0.20} },
+  { id:'speed', name:'急速射击', desc:'所有塔攻速 +25%', icon:'⚡', rarity:'common', color:'#fff', effect:{spdMul:0.25} },
+  { id:'crit_rate', name:'精准打击', desc:'暴击率 +15%', icon:'🎯', rarity:'common', color:'#fff', effect:{critRate:0.15} },
+  { id:'crit_dmg', name:'暴击伤害', desc:'暴击伤害 +50%', icon:'💥', rarity:'rare', color:'#aaccff', effect:{critDmgMul:0.50} },
+  { id:'range', name:'远射', desc:'所有塔射程 +25%', icon:'🔭', rarity:'common', color:'#fff', effect:{rangeMul:0.25} },
+  { id:'double_shot', name:'双重射击', desc:'12%概率发射2枚子弹', icon:'🎆', rarity:'rare', color:'#aaccff', effect:{doubleShot:0.12} },
+  { id:'frost_enchant', name:'冰霜附魔', desc:'所有塔减速 +15%', icon:'❄️', rarity:'rare', color:'#aaccff', effect:{slowMul:0.15} },
+  { id:'fire_amp', name:'火焰增幅', desc:'灼烧伤害 +30%', icon:'🔥', rarity:'rare', color:'#aaccff', effect:{burnMul:0.30} },
+  { id:'gold_bonus', name:'金币加成', desc:'击杀金币 +25%', icon:'💰', rarity:'common', color:'#fff', effect:{goldMul:0.25} },
+  { id:'repair', name:'基地修复', desc:'恢复2点基地生命', icon:'❤️', rarity:'common', color:'#fff', effect:{repair:2} },
+  { id:'thunder', name:'雷霆之怒', desc:'闪电连锁次数 +2', icon:'🌩️', rarity:'epic', color:'#dda0ff', effect:{chainAdd:2} },
+  { id:'poison_dur', name:'毒液强化', desc:'中毒持续时间 +50%', icon:'🧪', rarity:'rare', color:'#aaccff', effect:{poisonMul:0.50} },
+  { id:'vampire', name:'吸血光环', desc:'塔攻击回复造成伤害5%的金币', icon:'🩸', rarity:'epic', color:'#dda0ff', effect:{vampire:0.05} },
+  { id:'fortify', name:'加固基地', desc:'基地最大生命 +3', icon:'🛡️', rarity:'rare', color:'#aaccff', effect:{maxHpAdd:3} },
+  { id:'explosive', name:'爆炸弹头', desc:'子弹命中时小范围AOE', icon:'💣', rarity:'epic', color:'#dda0ff', effect:{explosive:40} },
+  { id:'fear', name:'恐惧光环', desc:'靠近基地的敌人减速20%', icon:'👻', rarity:'epic', color:'#dda0ff', effect:{fear:0.20} }
+];
+
+// ============================================================
+// 🦸 HERO DEFINITIONS
+// ============================================================
+const HERO_TYPES = [
+  { id:'assault', name:'突击兵', icon:'🔫', desc:'均衡型，基础攻击20，范围2格', color:'#ff9944',
+    damage:20, range:2, fireRate:35, speed:2.5, hp:100, attackColor:'#ffaa00' },
+  { id:'frost_mage', name:'冰霜法师', icon:'🧊', desc:'减速敌人，范围3格', color:'#88ccff',
+    damage:15, range:3, fireRate:40, speed:2.2, hp:80, slowAmount:0.5, slowDuration:90, attackColor:'#aaddff' },
+  { id:'demolition', name:'爆破专家', icon:'💣', desc:'AOE伤害，范围1.5格', color:'#ff6644',
+    damage:30, range:1.5, fireRate:50, speed:2.0, hp:120, aoeRadius:40, attackColor:'#ff4400' },
+  { id:'medic', name:'医疗兵', icon:'💚', desc:'治疗附近塔，范围2格', color:'#66ff66',
+    damage:10, range:2, fireRate:40, speed:2.3, hp:90, healAmount:0.1, healInterval:300, attackColor:'#88ff88' },
+];
+
+// ============================================================
+// 🎁 ITEM DROP DEFINITIONS
+// ============================================================
+const ITEM_TYPES = [
+  { id:'gold_bag', name:'金币袋', icon:'💰', desc:'+50~200金币', color:'#ffdd00', probability:0.08, type:'instant' },
+  { id:'freeze_bomb', name:'冰冻炸弹', icon:'❄️', desc:'冻结全屏敌人3秒', color:'#88ccff', probability:0.03, type:'instant' },
+  { id:'airstrike', name:'空袭信号', icon:'💣', desc:'对全屏敌人造成80伤害', color:'#ff6644', probability:0.03, type:'instant' },
+  { id:'life_restore', name:'生命恢复', icon:'❤️', desc:'恢复1点基地生命', color:'#ff4444', probability:0.02, type:'instant' },
+  { id:'speed_boost', name:'加速buff', icon:'⚡', desc:'所有塔攻速+50%持续8秒', color:'#ffff00', probability:0.03, type:'buff' },
+  { id:'shield', name:'护盾', icon:'🛡️', desc:'基地无敌5秒', color:'#4488ff', probability:0.02, type:'buff' },
+];
+
+// ============================================================
+// 🔥 ACTIVE SKILL DEFINITIONS
+// ============================================================
+const ACTIVE_SKILLS = [
+  { id:'airstrike', name:'空袭打击', icon:'💣', desc:'对点击位置造成AOE伤害(150)', cooldown:3600, color:'#ff6644' },
+  { id:'blizzard', name:'暴风雪', icon:'❄️', desc:'全屏敌人减速80%持续5秒', cooldown:5400, color:'#88ccff' },
+  { id:'golden_time', name:'黄金时刻', icon:'💰', desc:'10秒内击杀金币翻倍', cooldown:7200, color:'#ffdd00' },
+];
+
+// ============================================================
+// 🌤️ WEATHER DEFINITIONS
+// ============================================================
+const WEATHER_TYPES = [
+  { id:'sunny', name:'晴天', icon:'☀️', desc:'正常', color:'#ffdd57', enemySlow:0, fireDmgMul:1.0, towerRangeMul:1.0, enemyVisible:true },
+  { id:'rainy', name:'雨天', icon:'🌧️', desc:'敌人减速5%，火塔伤害-10%', color:'#5599cc', enemySlow:0.05, fireDmgMul:0.9, towerRangeMul:1.0, enemyVisible:true },
+  { id:'foggy', name:'雾天', icon:'🌫️', desc:'塔射程-15%，敌人偶尔隐形', color:'#aabbcc', enemySlow:0, fireDmgMul:1.0, towerRangeMul:0.85, enemyVisible:false },
+  { id:'heatwave', name:'热浪', icon:'🔥', desc:'火塔伤害+20%，冰塔减速-10%', color:'#ff8844', enemySlow:0, fireDmgMul:1.2, towerRangeMul:1.0, enemyVisible:true },
+];
+
+// ============================================================
+// 🏆 ACHIEVEMENT DEFINITIONS
+// ============================================================
+const ACHIEVEMENTS = [
+  { id:'first_defense', name:'初次防御', desc:'通关第1波', icon:'🛡️', target:1, trackedKey:'waveReached', condition:()=>game.wave>=1 },
+  { id:'tower_master', name:'塔防大师', desc:'建造10座塔', icon:'🏗️', target:10, trackedKey:'towersBuilt', condition:()=>game.towersBuilt>=10 },
+  { id:'boss_killer', name:'BOSS杀手', desc:'击杀5个BOSS', icon:'💀', target:5, trackedKey:'bossKills', condition:()=>game.bossKills>=5 },
+  { id:'rich', name:'富豪', desc:'累计获得5000金币', icon:'💰', target:5000, trackedKey:'totalGoldEarned', condition:()=>game.totalGoldEarned>=5000 },
+  { id:'sharpshooter', name:'神枪手', desc:'暴击杀死100个敌人', icon:'🎯', target:100, trackedKey:'critKills', condition:()=>game.critKills>=100 },
+  { id:'unbreakable', name:'坚不可摧', desc:'单局基地不掉血完成15波', icon:'💎', target:15, trackedKey:'perfectWave', condition:()=>game.wave>=15&&game.lives===game.maxLives&&game.waveActive===false },
+  { id:'skill_expert', name:'技能专家', desc:'收集20个技能', icon:'📚', target:20, trackedKey:'skillsCollected', condition:()=>game.skillsCollected>=20 },
+  { id:'endless_warrior', name:'无尽勇士', desc:'无尽模式达到30波', icon:'♾️', target:30, trackedKey:'endlessBestWave', condition:()=>game.wave>=30&&game.isEndless },
+];
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let game = {
+  gold: 200,
+  lives: 10,
+  maxLives: 10,
+  score: 0,
+  wave: 0,
+  totalWaves: 20,
+  waveActive: false,
+  waveComplete: false,
+  enemiesRemaining: 0,
+  enemiesSpawned: 0,
+  kills: 0,
+  timer: 0,
+  spawnTimer: 0,
+  spawnInterval: 40,
+  prepTimer: 0,
+  prepDuration: 180,
+  selectedTowerType: -1,
+  hoveredCell: null,
+  towers: [],
+  enemies: [],
+  bullets: [],
+  particles: [],
+  damageNumbers: [],
+  skills: [],
+  skillChoices: [],
+  skillPanelVisible: false,
+  towerMenu: null,
+  pathSet: new Set(),
+  pathWaypoints: [],
+  basePos: {x:15,y:8},
+  entryPos: {x:0,y:2},
+  bossWarning: 0,
+  vampireGold: 0,
+  globalAtkMul: 1.0, globalSpdMul: 1.0, globalRangeMul: 1.0,
+  globalSlowMul: 1.0, globalBurnMul: 1.0, globalPoisonMul: 1.0,
+  critRate: 0, critDmgMul: 2.0,
+  doubleShotChance: 0,
+  extraChain: 0,
+  goldBonus: 0,
+  explosiveRadius: 0,
+  fearSlow: 0,
+  burstMode: 0,
+  // 🦸 Hero system
+  hero: null,
+  heroTypeIdx: -1,
+  heroSelected: false,
+  heroTargetX: 0, heroTargetY: 0,
+  heroMoving: false,
+  heroRespawnTimer: 0,
+  heroRespawnDuration: 3600,
+  // 🎁 Item system
+  droppedItems: [],
+  collectedItems: {gold_bag:0,freeze_bomb:0,airstrike:0,life_restore:0,speed_boost:0,shield:0},
+  // 🔥 Active skills
+  activeSkills: [],
+  activeSkillCDs: [],
+  airstrikeTargeting: false,
+  goldenTimeActive: 0,
+  speedBoostActive: 0,
+  shieldActive: 0,
+  blizzardActive: 0,
+  // ♾️ Endless mode
+  isEndless: false,
+  endlessBossCounter: 0,
+  // 🏆 Achievements
+  achievements: {},
+  achievementPopup: null,
+  towersBuilt: 0,
+  bossKills: 0,
+  totalGoldEarned: 0,
+  critKills: 0,
+  skillsCollected: 0,
+  // 🎨 Visual
+  screenShake: 0,
+  screenShakeIntensity: 0,
+  weather: null,
+  waveTransition: 0,
+  waveTransitionText: '',
+};
+let mouseX = 0, mouseY = 0;
+let mouseDown = false;
+let rightClicking = false;
+let frameCount = 0;
+let deltaTime = 1;
+
+// ============================================================
+// HELPERS
+// ============================================================
+function dist(a,b){ return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2); }
+function cellCenter(col,row){ return {x:MAP_X+col*CELL_SIZE+CELL_SIZE/2, y:MAP_Y+row*CELL_SIZE+CELL_SIZE/2}; }
+function posToCell(px,py){
+  const col = Math.floor((px-MAP_X)/CELL_SIZE);
+  const row = Math.floor((py-MAP_Y)/CELL_SIZE);
+  if(col<0||col>=GRID_COLS||row<0||row>=GRID_ROWS) return null;
+  return {col, row};
+}
+function isPathCell(col,row){ return game.pathSet.has(`${col},${row}`); }
+function isBuildable(col,row){
+  if(col<0||col>=GRID_COLS||row<0||row>=GRID_ROWS) return false;
+  if(isPathCell(col,row)) return false;
+  for(const t of game.towers){ if(t.col===col&&t.row===row) return false; }
+  return true;
+}
+function getTowerAt(col,row){ return game.towers.find(t=>t.col===col&&t.row===row); }
+
+// ============================================================
+// INIT LEVEL
+// ============================================================
+function initLevel(levelIdx, keepHero=false){
+  currentLevel = levelIdx;
+  const lv = levelDefs[levelIdx];
+  game.pathSet.clear();
+  game.pathWaypoints = lv.path;
+  for(const p of lv.path){ game.pathSet.add(`${p.x},${p.y}`); }
+  const last = lv.path[lv.path.length-1];
+  game.basePos = {x:last.x, y:last.y};
+  game.entryPos = {x:lv.path[0].x, y:lv.path[0].y};
+  game.gold = 200 + levelIdx*25;
+  game.lives = 10;
+  game.maxLives = 10;
+  game.score = 0;
+  game.wave = 0;
+  game.waveActive = false;
+  game.waveComplete = false;
+  game.enemiesRemaining = 0;
+  game.enemiesSpawned = 0;
+  game.kills = 0;
+  game.timer = 0;
+  game.spawnTimer = 0;
+  game.prepTimer = game.prepDuration;
+  game.towers = [];
+  game.enemies = [];
+  game.bullets = [];
+  game.particles = [];
+  game.damageNumbers = [];
+  game.skills = [];
+  game.skillChoices = [];
+  game.skillPanelVisible = false;
+  game.towerMenu = null;
+  game.selectedTowerType = -1;
+  game.bossWarning = 0;
+  game.vampireGold = 0;
+  // reset global mods
+  game.globalAtkMul = 1.0; game.globalSpdMul = 1.0; game.globalRangeMul = 1.0;
+  game.globalSlowMul = 1.0; game.globalBurnMul = 1.0; game.globalPoisonMul = 1.0;
+  game.critRate = 0; game.critDmgMul = 2.0;
+  game.doubleShotChance = 0;
+  game.extraChain = 0; game.goldBonus = 0;
+  game.explosiveRadius = 0; game.fearSlow = 0;
+  // 🆕 Init new systems
+  game.droppedItems = [];
+  game.collectedItems = {gold_bag:0,freeze_bomb:0,airstrike:0,life_restore:0,speed_boost:0,shield:0};
+  game.activeSkillCDs = [0,0,0];
+  game.airstrikeTargeting = false;
+  game.goldenTimeActive = 0;
+  game.speedBoostActive = 0;
+  game.shieldActive = 0;
+  game.blizzardActive = 0;
+  game.isEndless = false;
+  game.endlessBossCounter = 0;
+  game.screenShake = 0;
+  game.screenShakeIntensity = 0;
+  game.waveTransition = 0;
+  game.waveTransitionText = '';
+  // 🎲 Random weather
+  game.weather = WEATHER_TYPES[Math.floor(Math.random()*WEATHER_TYPES.length)];
+  // 🏆 Session achievements
+  game.towersBuilt = 0;
+  game.bossKills = 0;
+  game.totalGoldEarned = 200 + levelIdx*25;
+  game.critKills = 0;
+  game.skillsCollected = 0;
+  // Load persistent achievements
+  loadAchievements();
+  // 🌟 Hero init (keep hero if endless mode)
+  if(!keepHero || !game.hero){
+    game.heroSelected = false;
+    game.hero = null;
+    game.heroTypeIdx = -1;
+    game.heroRespawnTimer = 0;
+    // Show hero selection
+    gameState = GS.PLAYING;
+  } else {
+    gameState = GS.PLAYING;
+  }
+}
+
+// ============================================================
+// WAVE SYSTEM
+// ============================================================
+function getWaveConfig(waveNum){
+  const isBossWave = (waveNum % 5 === 0);
+  const baseCount = 5 + waveNum * 2;
+  return {
+    isBossWave,
+    enemyCount: isBossWave ? baseCount + 1 : baseCount,
+    spawnInterval: Math.max(18, 40 - waveNum * 1.2),
+    bossCount: isBossWave ? 1 + Math.floor((waveNum-5)/10) : 0,
+  };
+}
+function getEnemyTypes(waveNum){
+  const types = ['normal'];
+  if(waveNum>=2) types.push('fast');
+  if(waveNum>=4) types.push('tank');
+  if(waveNum>=6) types.push('exploder');
+  if(waveNum>=8) types.push('healer');
+  if(waveNum>=10) types.push('splitter');
+  return types;
+}
+function spawnEnemy(type, isBoss=false){
+  const lv = levelDefs[currentLevel];
+  const wp = game.pathWaypoints;
+  const start = cellCenter(wp[0].x, wp[0].y);
+  let e;
+  switch(type){
+    case 'normal':
+      e = { type:'normal', x:start.x, y:start.y, wpIndex:0, hp:80*lv.hpMult, maxHp:80*lv.hpMult, speed:1.2*lv.spdMult*getEndlessEnemySpeedMult(), size:14, color:'#6bab45', bounty:10, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'fast':
+      e = { type:'fast', x:start.x, y:start.y, wpIndex:0, hp:40*lv.hpMult, maxHp:40*lv.hpMult, speed:2.5*lv.spdMult, size:10, color:'#ddaa33', bounty:8, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'tank':
+      e = { type:'tank', x:start.x, y:start.y, wpIndex:0, hp:250*lv.hpMult, maxHp:250*lv.hpMult, speed:0.7*lv.spdMult*getEndlessEnemySpeedMult(), size:18, color:'#556677', bounty:20, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'exploder':
+      e = { type:'exploder', x:start.x, y:start.y, wpIndex:0, hp:100*lv.hpMult, maxHp:100*lv.hpMult, speed:1.3*lv.spdMult, size:15, color:'#ee7733', bounty:12, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'healer':
+      e = { type:'healer', x:start.x, y:start.y, wpIndex:0, hp:120*lv.hpMult, maxHp:120*lv.hpMult, speed:1.0*lv.spdMult, size:15, color:'#eeeeff', bounty:15, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, healCd:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'splitter':
+      e = { type:'splitter', x:start.x, y:start.y, wpIndex:0, hp:150*lv.hpMult, maxHp:150*lv.hpMult, speed:1.2*lv.spdMult, size:16, color:'#aa66cc', bounty:18, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+    case 'boss':
+      e = { type:'boss', x:start.x, y:start.y, wpIndex:0, hp:600*lv.hpMult+waveNum*200, maxHp:600*lv.hpMult+waveNum*200, speed:0.4*lv.spdMult, size:28, color:'#cc2222', bounty:100+waveNum*20, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0, healed:0, bossGlow:0, floatOff:Math.random()*Math.PI*2 };
+      break;
+  }
+  if(isBoss){ e.type='boss'; e.hp=600*lv.hpMult+waveNum*200; e.maxHp=e.hp; e.speed=0.4*lv.spdMult; e.size=28; e.color='#cc2222'; e.bounty=100+waveNum*20; e.bossGlow=0; }
+  game.enemies.push(e);
+  game.enemiesSpawned++;
+  game.enemiesRemaining++;
+}
+
+function startWave(){
+  if(game.waveActive) return;
+  if(game.wave >= game.totalWaves) return;
+  game.wave++;
+  game.waveActive = true;
+  game.waveComplete = false;
+  game.enemiesRemaining = 0;
+  game.enemiesSpawned = 0;
+  game.spawnTimer = 0;
+  const cfg = getWaveConfig(game.wave);
+  game.spawnInterval = cfg.spawnInterval;
+  game.bossWarning = cfg.isBossWave ? 120 : 0;
+  if(cfg.isBossWave) sfxBossSpawn();
+  // Schedule spawns
+  game._waveCfg = cfg;
+  game._spawnQueue = [];
+  const types = getEnemyTypes(game.wave);
+  let remaining = cfg.enemyCount;
+  while(remaining>0){
+    const t = types[Math.floor(Math.random()*types.length)];
+    game._spawnQueue.push(t);
+    remaining--;
+  }
+  if(cfg.isBossWave){
+    // Insert boss(es) randomly in the spawn queue
+    for(let i=0;i<cfg.bossCount;i++){
+      const pos = Math.floor(Math.random()*(game._spawnQueue.length+1));
+      game._spawnQueue.splice(pos,0,'boss');
+    }
+  }
+  game.towerMenu = null;
+  game.selectedTowerType = -1;
+}
+
+// ============================================================
+// SKILL SYSTEM
+// ============================================================
+function rollSkillRarity(){
+  const r = Math.random();
+  if(r<0.05) return 'legendary';
+  if(r<0.15) return 'epic';
+  if(r<0.35) return 'rare';
+  return 'common';
+}
+function generateSkillChoices(){
+  const pool = [...ALL_SKILLS];
+  // Shuffle
+  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  const choices = pool.slice(0,3);
+  return choices.map(s=>{
+    const rarity = rollSkillRarity();
+    let mul = 1.0;
+    const colorMap = { common:'#ffffff', rare:'#8899ff', epic:'#cc88ff', legendary:'#ffaa00' };
+    if(rarity==='rare') mul=1.5;
+    if(rarity==='epic') mul=2.0;
+    if(rarity==='legendary') mul=3.0;
+    const effect = {};
+    for(const [k,v] of Object.entries(s.effect)){
+      effect[k] = typeof v==='number' ? v*mul : v;
+    }
+    return { ...s, rarity, color:colorMap[rarity], effect, rarityMul:mul };
+  });
+}
+function applySkill(skill){
+  game.skills.push(skill);
+  game.skillsCollected++;
+  const e = skill.effect;
+  if(e.atkMul) game.globalAtkMul += e.atkMul;
+  if(e.spdMul) game.globalSpdMul += e.spdMul;
+  if(e.critRate) game.critRate += e.critRate;
+  if(e.critDmgMul) game.critDmgMul += e.critDmgMul;
+  if(e.rangeMul) game.globalRangeMul += e.rangeMul;
+  if(e.doubleShot) game.doubleShotChance += e.doubleShot;
+  if(e.slowMul) game.globalSlowMul += e.slowMul;
+  if(e.burnMul) game.globalBurnMul += e.burnMul;
+  if(e.goldMul) game.goldBonus += e.goldMul;
+  if(e.repair) game.lives = Math.min(game.maxLives, game.lives+e.repair);
+  if(e.chainAdd) game.extraChain += e.chainAdd;
+  if(e.poisonMul) game.globalPoisonMul += e.poisonMul;
+  if(e.vampire) game.vampireGold += e.vampire;
+  if(e.maxHpAdd){ game.maxLives += e.maxHpAdd; game.lives += e.maxHpAdd; }
+  if(e.explosive) game.explosiveRadius = Math.max(game.explosiveRadius, e.explosive);
+  if(e.fear) game.fearSlow = Math.max(game.fearSlow, e.fear);
+  game.skillPanelVisible = false;
+  game.prepTimer = game.prepDuration;
+  checkAchievements();
+}
+
+// ============================================================
+// TOWER PLACEMENT & MANAGEMENT
+// ============================================================
+function placeTower(col, row, typeIdx){
+  const def = TOWER_TYPES[typeIdx];
+  if(game.gold < def.cost) return false;
+  if(!isBuildable(col, row)) return false;
+  const pos = cellCenter(col, row);
+  game.towers.push({
+    type: typeIdx,
+    col, row,
+    x: pos.x, y: pos.y,
+    level: 1,
+    fireTimer: 0,
+    target: null,
+  });
+  game.gold -= def.cost;
+  game.towersBuilt++;
+  sfxPlace();
+  game.towerMenu = null;
+  checkAchievements();
+  return true;
+}
+function upgradeTower(tower){
+  const def = TOWER_TYPES[tower.type];
+  if(tower.level >= 4) return false;
+  const upg = def.upgrades[tower.level-1];
+  if(!upg || game.gold < upg.cost) return false;
+  game.gold -= upg.cost;
+  tower.level++;
+  sfxUpgrade();
+  return true;
+}
+function sellTower(tower){
+  let refund = TOWER_TYPES[tower.type].cost;
+  for(let i=1;i<tower.level;i++){
+    refund += TOWER_TYPES[tower.type].upgrades[i-1].cost;
+  }
+  refund = Math.floor(refund * 0.6);
+  game.gold += refund;
+  game.towers = game.towers.filter(t=>t!==tower);
+  sfxClick();
+}
+function getTowerDamage(tower){
+  const def = TOWER_TYPES[tower.type];
+  let dmg = def.damage;
+  let upg = null;
+  if(tower.level>1) upg = def.upgrades[tower.level-2];
+  if(upg) dmg *= upg.dmgMul;
+  // For level 3+, apply previous upgrade multiplier too
+  if(tower.level>=3){
+    const upg2 = def.upgrades[tower.level-3];
+    // chain multipliers
+    dmg = def.damage;
+    for(let i=0;i<tower.level-1;i++) dmg *= def.upgrades[i].dmgMul;
+  }
+  dmg *= game.globalAtkMul;
+  return dmg;
+}
+function getTowerFireRate(tower){
+  const def = TOWER_TYPES[tower.type];
+  let rate = def.fireRate;
+  if(tower.level>1){
+    rate = def.fireRate;
+    for(let i=0;i<tower.level-1;i++) rate *= def.upgrades[i].rateMul;
+  }
+  rate *= (1.0 / game.globalSpdMul);
+  return Math.max(5, rate);
+}
+function getTowerRange(tower){
+  const def = TOWER_TYPES[tower.type];
+  let range = def.range;
+  for(let i=0;i<tower.level-1;i++) range += def.upgrades[i].rangeAdd;
+  range *= game.globalRangeMul;
+  return range;
+}
+function getTowerBulletColor(tower){
+  return TOWER_TYPES[tower.type].bulletColor;
+}
+function getTowerSpecials(tower){
+  const def = TOWER_TYPES[tower.type];
+  return {
+    slowAmount: def.slowAmount ? def.slowAmount * (game.globalSlowMul) * (tower.level>1?def.upgrades[Math.min(tower.level-2,2)].slowMul||1:1) : 0,
+    slowDuration: def.slowDuration || 0,
+    burnDamage: def.burnDamage ? def.burnDamage * (game.globalBurnMul) * (tower.level>1?def.upgrades[Math.min(tower.level-2,2)].burnMul||1:1) : 0,
+    burnDuration: def.burnDuration || 0,
+    chainCount: def.chainCount ? def.chainCount + game.extraChain + (tower.level>1?(def.upgrades[Math.min(tower.level-2,2)].chainAdd||0):0) : 0,
+    chainRange: def.chainRange || 0,
+    poisonDamage: def.poisonDamage ? def.poisonDamage * (game.globalPoisonMul) * (tower.level>1?def.upgrades[Math.min(tower.level-2,2)].poisonMul||1:1) : 0,
+    poisonDuration: def.poisonDuration || 0,
+  };
+}
+
+// ============================================================
+// COMBAT SYSTEM
+// ============================================================
+function fireBullet(tower, target){
+  const sp = getTowerSpecials(tower);
+  const bulletColor = getTowerBulletColor(tower);
+  const dmg = getTowerDamage(tower);
+  const isCrit = Math.random() < game.critRate;
+  const finalDmg = isCrit ? dmg * game.critDmgMul : dmg;
+
+  const b = {
+    x: tower.x, y: tower.y,
+    target: target,
+    speed: TOWER_TYPES[tower.type].bulletSpeed,
+    damage: finalDmg,
+    color: bulletColor,
+    isCrit,
+    tower,
+    specials: sp,
+  };
+  game.bullets.push(b);
+
+  // Double shot
+  if(Math.random() < game.doubleShotChance){
+    const b2 = { ...b, target: target };
+    game.bullets.push(b2);
+  }
+
+  // Sound
+  const ttype = tower.type;
+  if(ttype===1) sfxIceShoot();
+  else if(ttype===2) sfxFireShoot();
+  else if(ttype===3) sfxLightning();
+  else if(ttype===4) sfxPoisonShoot();
+  else sfxShoot();
+}
+
+function damageEnemy(enemy, damage, tower, isCrit){
+  enemy.hp -= damage;
+  // Damage number
+  const txt = (isCrit ? '💥'+Math.round(damage) : Math.round(damage).toString());
+  game.damageNumbers.push({
+    x: enemy.x, y: enemy.y-10,
+    text: txt,
+    color: isCrit ? '#ffdd00' : '#ff4444',
+    life: 40,
+    vy: -1.5,
+  });
+  sfxDamage();
+  // Vampire
+  if(game.vampireGold > 0){
+    game.gold = Math.round((game.gold + damage * game.vampireGold)*100)/100;
+  }
+  if(enemy.hp <= 0 && enemy.hp + damage > 0){
+    if(isCrit) game.critKills++;
+    killEnemy(enemy);
+  }
+}
+
+function killEnemy(enemy){
+  const bonus = 1.0 + game.goldBonus;
+  const goldMult = game.goldenTimeActive>0 ? 2 : 1;
+  const bounty = Math.round(enemy.bounty * bonus * goldMult);
+  game.gold += bounty;
+  game.totalGoldEarned += bounty;
+  game.score += enemy.bounty;
+  game.kills++;
+  game.enemiesRemaining--;
+
+  // Particles
+  for(let i=0;i<8;i++){
+    game.particles.push({
+      x: enemy.x, y: enemy.y,
+      vx: (Math.random()-0.5)*4, vy: (Math.random()-0.5)*4,
+      life: 20+Math.random()*15, color: enemy.color, size: 2+Math.random()*3,
+    });
+  }
+
+  // Special death effects
+  if(enemy.type==='exploder'){
+    sfxExplosion();
+    const rng = 60;
+    for(const e2 of game.enemies){
+      if(e2!==enemy && dist(enemy, e2) < rng){
+        damageEnemy(e2, 40, null);
+      }
+    }
+    for(let i=0;i<15;i++){
+      game.particles.push({
+        x: enemy.x, y: enemy.y,
+        vx: (Math.random()-0.5)*8, vy: (Math.random()-0.5)*8,
+        life: 25+Math.random()*20, color:'#ff6600', size: 2+Math.random()*4,
+      });
+    }
+  }
+  if(enemy.type==='splitter'){
+    for(let i=0;i<2;i++){
+      const child = {
+        type:'fast', x:enemy.x, y:enemy.y, wpIndex:enemy.wpIndex,
+        hp:30, maxHp:30, speed:2.0, size:8, color:'#bb88dd',
+        bounty:4, slowTimer:0, burnTimer:0, burnDmg:0, poisonTimer:0, poisonDmg:0,
+        healed:0, floatOff:Math.random()*Math.PI*2
+      };
+      game.enemies.push(child);
+      game.enemiesRemaining++;
+    }
+  }
+  if(enemy.type==='boss'){
+    sfxExplosion();
+    game.bossKills++;
+    for(let i=0;i<25;i++){
+      game.particles.push({
+        x: enemy.x, y: enemy.y,
+        vx: (Math.random()-0.5)*10, vy: (Math.random()-0.5)*10,
+        life: 30+Math.random()*30, color:Math.random()>0.5?'#ff4444':'#ffaa00', size: 2+Math.random()*6,
+      });
+    }
+    game.bossWarning = 0;
+    game.screenShake = 25;
+    game.screenShakeIntensity = 8;
+    // Boss guaranteed drops
+    for(let i=0;i<3;i++){
+      const it = ITEM_TYPES[Math.floor(Math.random()*ITEM_TYPES.length)];
+      spawnItemDrop(enemy.x, enemy.y, it);
+    }
+  }
+
+  // 🎁 Random item drop
+  tryDropItem(enemy);
+
+  // 🔥 Hero XP
+  if(game.hero && !game.hero.dead){
+    game.hero.xp = (game.hero.xp||0) + (enemy.type==='boss'?50:enemy.type==='tank'?20:10);
+    checkHeroLevelUp();
+  }
+
+  game.enemies = game.enemies.filter(e=>e!==enemy);
+}
+
+function towerTargetEnemy(tower){
+  const rng = getTowerRange(tower) * CELL_SIZE;
+  let best = null;
+  let bestDist = Infinity;
+  // Prioritize: boss > closest to base > closest
+  for(const e of game.enemies){
+    const d = dist(tower, e);
+    if(d > rng) continue;
+    if(e.type==='boss') return e;
+    const progress = e.wpIndex / game.pathWaypoints.length;
+    if(progress > 0.5 && d < bestDist){ best=e; bestDist=d; }
+    if(d < bestDist){ best=e; bestDist=d; }
+  }
+  return best;
+}
+
+function updateTowers(){
+  for(const t of game.towers){
+    t.fireTimer -= deltaTime;
+    if(t.fireTimer <= 0){
+      const target = towerTargetEnemy(t);
+      if(target){
+        fireBullet(t, target);
+        t.fireTimer = getTowerFireRate(t);
+      }
+    }
+  }
+}
+
+function updateBullets(){
+  for(const b of game.bullets){
+    if(!b.target || b.target.hp <= 0){
+      b.dead = true; continue;
+    }
+    const dx = b.target.x - b.x;
+    const dy = b.target.y - b.y;
+    const d = Math.sqrt(dx*dx+dy*dy);
+    if(d < 8){
+      // Hit
+      damageEnemy(b.target, b.damage, b.tower, b.isCrit);
+      // Special effects
+      if(b.specials.slowAmount > 0){
+        b.target.slowTimer = b.specials.slowDuration;
+        b.target.slowAmount = b.specials.slowAmount;
+      }
+      if(b.specials.burnDamage > 0){
+        b.target.burnTimer = b.specials.burnDuration;
+        b.target.burnDmg = b.specials.burnDamage;
+      }
+      if(b.specials.poisonDamage > 0){
+        b.target.poisonTimer = b.specials.poisonDuration;
+        b.target.poisonDmg = b.specials.poisonDamage;
+      }
+      if(b.specials.chainCount > 0){
+        chainLightning(b.target, b.specials.chainCount-1, b.specials.chainRange, b.damage*0.6, b.tower);
+      }
+      // Explosive skill
+      if(game.explosiveRadius > 0 && b.target.hp > 0){
+        for(const e2 of game.enemies){
+          if(e2!==b.target && dist(b.target, e2) < game.explosiveRadius){
+            damageEnemy(e2, b.damage*0.25, b.tower);
+          }
+        }
+        for(let i=0;i<5;i++){
+          game.particles.push({
+            x:b.target.x, y:b.target.y, vx:(Math.random()-0.5)*3, vy:(Math.random()-0.5)*3,
+            life:10, color:'#ffaa00', size:2+Math.random()*2,
+          });
+        }
+      }
+      b.dead = true;
+    } else {
+      const spd = b.speed * (deltaTime/16.67);
+      b.x += (dx/d) * spd;
+      b.y += (dy/d) * spd;
+    }
+  }
+  game.bullets = game.bullets.filter(b=>!b.dead);
+}
+
+function chainLightning(target, remaining, range, damage, tower){
+  if(remaining<=0) return;
+  let nearest=null, nearestDist=range*CELL_SIZE;
+  for(const e of game.enemies){
+    if(e===target || e.hp<=0) continue;
+    const d = dist(target, e);
+    if(d < nearestDist){ nearestDist=d; nearest=e; }
+  }
+  if(nearest){
+    // Draw chain visual
+    game.particles.push({
+      x:target.x, y:target.y, vx:nearest.x-target.x, vy:nearest.y-target.y,
+      life:8, color:'#ffff00', size:2, isChain:true, target:nearest,
+    });
+    damageEnemy(nearest, damage, tower);
+    if(nearest.hp>0) chainLightning(nearest, remaining-1, range, damage*0.6, tower);
+  }
+}
+
+function updateEnemies(){
+  const wp = game.pathWaypoints;
+  for(const e of game.enemies){
+    // Movement
+    if(e.wpIndex < wp.length){
+      const targetWp = cellCenter(wp[e.wpIndex].x, wp[e.wpIndex].y);
+      const dx = targetWp.x - e.x;
+      const dy = targetWp.y - e.y;
+      const d = Math.sqrt(dx*dx+dy*dy);
+      let spd = e.speed * (deltaTime/16.67);
+      // 🆕 Weather slow
+      if(game.weather && game.weather.enemySlow > 0) spd *= (1-game.weather.enemySlow);
+      // 🆕 Frozen
+      if(e.frozen && e._frozenTimer > 0){
+        spd = 0;
+        e._frozenTimer -= deltaTime;
+        if(e._frozenTimer <= 0) e.frozen = false;
+      }
+      // 🆕 Blizzard
+      if(game.blizzardActive > 0 && e.blizzarded){
+        spd *= 0.2;
+      }
+      // Slow
+      if(e.slowTimer > 0){
+        const amt = e.slowAmount || 0.4;
+        spd *= (1-amt);
+        e.slowTimer -= deltaTime;
+      }
+      // Fear aura near base
+      const baseC = cellCenter(game.basePos.x, game.basePos.y);
+      if(game.fearSlow>0 && dist(e, baseC) < CELL_SIZE*4){
+        spd *= (1-game.fearSlow);
+      }
+      if(d < spd + 1){
+        e.x = targetWp.x;
+        e.y = targetWp.y;
+        e.wpIndex++;
+      } else {
+        e.x += (dx/d) * spd;
+        e.y += (dy/d) * spd;
+      }
+    }
+    // 🆕 Foggy - enemies occasionally invisible (still take damage)
+    e._visible = !game.weather || game.weather.enemyVisible;
+    if(game.weather && !game.weather.enemyVisible){
+      e._visible = (Math.sin(frameCount*0.05+e.floatOff) > 0.2);
+    }
+    // Reach end
+    if(e.wpIndex >= wp.length){
+      if(e.type==='exploder'){
+        game.lives -= 3;
+        sfxExplosion();
+        for(let i=0;i<15;i++){
+          game.particles.push({
+            x:e.x, y:e.y, vx:(Math.random()-0.5)*8, vy:(Math.random()-0.5)*8,
+            life:20, color:'#ff6600', size:2+Math.random()*4,
+          });
+        }
+      } else {
+        game.lives -= 1;
+      }
+      e.dead = true;
+      game.enemiesRemaining--;
+      if(game.lives <= 0) game.lives = 0;
+    }
+    // Status effects
+    if(e.burnTimer > 0){
+      e.hp -= e.burnDmg * (deltaTime/60);
+      e.burnTimer -= deltaTime;
+    }
+    if(e.poisonTimer > 0){
+      e.hp -= e.poisonDmg * (deltaTime/60);
+      e.poisonTimer -= deltaTime;
+      if(frameCount%20===0){
+        game.particles.push({
+          x:e.x+(Math.random()-0.5)*e.size, y:e.y+(Math.random()-0.5)*e.size,
+          vx:0, vy:-1, life:15, color:'#00ff00', size:2,
+        });
+      }
+    }
+    if(e.burnDmg>0 && e.burnTimer>0 && frameCount%10===0){
+      game.particles.push({
+        x:e.x+(Math.random()-0.5)*e.size, y:e.y+(Math.random()-0.5)*e.size,
+        vx:(Math.random()-0.5)*1, vy:-1-Math.random()*2,
+        life:12, color:'#ff4400', size:2+Math.random()*2,
+      });
+    }
+    if(e.hp<=0){
+      killEnemy(e);
+      e.dead = true;
+    }
+    // Healer
+    if(e.type==='healer'){
+      e.healCd = (e.healCd||0) - deltaTime;
+      if(e.healCd <= 0){
+        e.healCd = 120;
+        for(const e2 of game.enemies){
+          if(e2!==e && dist(e, e2) < CELL_SIZE*3){
+            e2.hp = Math.min(e2.maxHp, e2.hp + 10);
+            game.particles.push({
+              x:e2.x, y:e2.y, vx:0, vy:-1, life:15, color:'#ffffff', size:3,
+            });
+          }
+        }
+      }
+    }
+  }
+  game.enemies = game.enemies.filter(e=>!e.dead);
+}
+
+// ============================================================
+// SPAWN SYSTEM
+// ============================================================
+function updateSpawning(){
+  if(!game.waveActive) return;
+  if(game.bossWarning > 0){ game.bossWarning -= deltaTime; return; }
+  if(!game._spawnQueue || game._spawnQueue.length===0){
+    if(game.enemiesRemaining <= 0){
+      waveComplete();
+    }
+    return;
+  }
+  game.spawnTimer -= deltaTime;
+  if(game.spawnTimer <= 0){
+    const type = game._spawnQueue.shift();
+    spawnEnemy(type, type==='boss');
+    game.spawnTimer = game.spawnInterval;
+  }
+}
+
+function waveComplete(){
+  game.waveActive = false;
+  game.waveComplete = true;
+  game._spawnQueue = [];
+  sfxWaveComplete();
+  game.score += game.wave * 50;
+  game.gold += 50 + game.wave * 10;
+  game.totalGoldEarned += 50 + game.wave * 10;
+
+  // 🏆 Check achievements
+  checkAchievements();
+
+  // ♾️ Endless mode check
+  if(game.wave >= game.totalWaves && !game.isEndless){
+    gameState = GS.VICTORY;
+    sfxVictory();
+    if(game.score > saveData.scores[currentLevel]) saveData.scores[currentLevel] = game.score;
+    if(game.wave > saveData.waves[currentLevel]) saveData.waves[currentLevel] = game.wave;
+    saveData.completed[currentLevel] = true;
+    saveSave(saveData);
+    return;
+  }
+
+  // Skill selection (every wave in normal mode, every 2 waves in endless)
+  if(!game.isEndless || game.wave % 2 === 0){
+    game.skillChoices = generateSkillChoices();
+    game.skillPanelVisible = true;
+    gameState = GS.SKILL_SELECT;
+  }
+}
+
+// ============================================================
+// PARTICLES & DAMAGE NUMBERS
+// ============================================================
+function updateParticles(){
+  for(const p of game.particles){
+    if(p.isChain) continue;
+    p.x += p.vx; p.y += p.vy;
+    p.life -= deltaTime;
+  }
+  game.particles = game.particles.filter(p=>p.life>0);
+}
+function updateDamageNumbers(){
+  for(const d of game.damageNumbers){
+    d.y += d.vy;
+    d.life -= deltaTime;
+  }
+  game.damageNumbers = game.damageNumbers.filter(d=>d.life>0);
+}
+
+// ============================================================
+// 🦸 HERO SYSTEM
+// ============================================================
+function initHero(typeIdx){const def=HERO_TYPES[typeIdx];const entry=cellCenter(game.pathWaypoints[0].x,game.pathWaypoints[0].y);game.heroTypeIdx=typeIdx;game.heroSelected=true;game.hero={typeIdx,x:entry.x+CELL_SIZE*2,y:entry.y,targetX:entry.x+CELL_SIZE*2,targetY:entry.y,moving:false,hp:def.hp,maxHp:def.hp,level:1,xp:0,xpToNext:100,fireTimer:0,dead:false,attackTarget:null,healTimer:0,size:12};game.heroRespawnTimer=0;game.heroTargetX=game.hero.x;game.heroTargetY=game.hero.y;}
+function getHeroDef(){if(game.heroTypeIdx<0)return null;return HERO_TYPES[game.heroTypeIdx];}
+function getHeroDamage(){const def=getHeroDef();if(!def)return 0;return def.damage*(1+(game.hero.level-1)*0.15);}
+function getHeroMaxHP(){const def=getHeroDef();if(!def)return 100;return def.hp*(1+(game.hero.level-1)*0.20);}
+function getHeroRange(){const def=getHeroDef();if(!def)return 2;return def.range;}
+function getHeroFireRate(){const def=getHeroDef();if(!def)return 35;return def.fireRate;}
+function getHeroSpeed(){const def=getHeroDef();if(!def)return 2.5;return def.speed;}
+function checkHeroLevelUp(){const h=game.hero;if(!h||h.dead||h.level>=10)return;while(h.xp>=h.xpToNext&&h.level<10){h.xp-=h.xpToNext;h.level++;h.maxHp=getHeroMaxHP();h.hp=Math.min(h.hp+h.maxHp*0.2,h.maxHp);h.xpToNext=Math.floor(h.xpToNext*1.5);for(let i=0;i<12;i++){game.particles.push({x:h.x,y:h.y,vx:(Math.random()-0.5)*4,vy:(Math.random()-0.5)*4,life:25,color:'#ffdd00',size:2+Math.random()*3});}sfxUpgrade();}}
+function heroTargetEnemy(hero){const rng=getHeroRange()*CELL_SIZE;let best=null,bestDist=Infinity;for(const e of game.enemies){const d=dist(hero,e);if(d>rng)continue;if(e.type==='boss')return e;if(d<bestDist){best=e;bestDist=d;}}return best;}
+function updateHero(){if(!game.hero||!game.heroSelected)return;const h=game.hero;if(h.dead){game.heroRespawnTimer-=deltaTime;if(game.heroRespawnTimer<=0){h.dead=false;const entry=cellCenter(game.pathWaypoints[0].x,game.pathWaypoints[0].y);h.x=entry.x+CELL_SIZE*2;h.y=entry.y;h.hp=h.maxHp;h.targetX=h.x;h.targetY=h.y;game.heroRespawnTimer=0;for(let i=0;i<15;i++){game.particles.push({x:h.x,y:h.y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:30,color:'#44ff44',size:2+Math.random()*4});}}return;}const dx=game.heroTargetX-h.x;const dy=game.heroTargetY-h.y;const d=Math.sqrt(dx*dx+dy*dy);if(d>3){const spd=getHeroSpeed()*(deltaTime/16.67);h.x+=(dx/d)*spd;h.y+=(dy/d)*spd;h.moving=true;}else{h.moving=false;}h.fireTimer-=deltaTime;if(h.fireTimer<=0){const target=heroTargetEnemy(h);if(target){const def=getHeroDef();const dmg=getHeroDamage();const isCrit=Math.random()<game.critRate;const finalDmg=isCrit?dmg*game.critDmgMul:dmg;damageEnemy(target,finalDmg,null,isCrit);h.fireTimer=getHeroFireRate();game.bullets.push({x:h.x,y:h.y,target,speed:10,damage:0,color:def.attackColor,isCrit,tower:null,specials:{},isHero:true});if(def.slowAmount){target.slowTimer=def.slowDuration;target.slowAmount=def.slowAmount;sfxHeroFrost();}else if(def.aoeRadius){for(const e2 of game.enemies){if(e2!==target&&dist(target,e2)<def.aoeRadius){damageEnemy(e2,dmg*0.5,null,false);}}for(let i=0;i<6;i++){game.particles.push({x:target.x,y:target.y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:12,color:'#ff4400',size:2+Math.random()*3});}sfxHeroExplosion();}else if(def.healAmount){sfxHeroHeal();}else{sfxHeroAttack();}}}if(getHeroDef()&&getHeroDef().healAmount){h.healTimer-=deltaTime;if(h.healTimer<=0){h.healTimer=getHeroDef().healInterval;let nearest=null,nearestDist=Infinity;for(const t of game.towers){const d2=dist(h,t);if(d2<getHeroRange()*CELL_SIZE&&d2<nearestDist){nearest=t;nearestDist=d2;}}if(nearest){nearest.fireTimer=Math.max(0,nearest.fireTimer-getTowerFireRate(nearest)*getHeroDef().healAmount);game.particles.push({x:nearest.x,y:nearest.y,vx:0,vy:-2,life:20,color:'#88ff88',size:4});}}}for(const e of game.enemies){if(dist(h,e)<(h.size||12)+e.size){h.hp-=8*(deltaTime/60);if(h.hp<=0){h.hp=0;h.dead=true;game.heroRespawnTimer=game.heroRespawnDuration;for(let i=0;i<15;i++){game.particles.push({x:h.x,y:h.y,vx:(Math.random()-0.5)*6,vy:(Math.random()-0.5)*6,life:25,color:'#ff4444',size:2+Math.random()*4});}sfxExplosion();break;}}}}
+
+// ============================================================
+// 🎁 ITEM DROP SYSTEM
+// ============================================================
+function spawnItemDrop(x,y,itemDef){game.droppedItems.push({type:itemDef.id,x:x+(Math.random()-0.5)*30,y:y+(Math.random()-0.5)*20,life:480,floatOff:Math.random()*Math.PI*2});sfxItemDrop();}
+function tryDropItem(enemy){const probMult=enemy.type==='boss'?5:(enemy.type==='tank'?1.5:1);for(const it of ITEM_TYPES){if(Math.random()<it.probability*probMult){spawnItemDrop(enemy.x,enemy.y,it);return;}}}
+function pickupItem(item){const def=ITEM_TYPES.find(it=>it.id===item.type);if(!def)return;game.collectedItems[item.type]=(game.collectedItems[item.type]||0)+1;sfxItemPickup();switch(item.type){case'gold_bag':const gold=50+Math.floor(Math.random()*151);game.gold+=gold;game.totalGoldEarned+=gold;game.damageNumbers.push({x:item.x,y:item.y,text:'+'+gold+'💰',color:'#ffdd00',life:40,vy:-2});break;case'freeze_bomb':sfxFreezeBomb();for(const e of game.enemies){e.frozen=true;e._frozenTimer=180;}for(let i=0;i<20;i++){game.particles.push({x:item.x,y:item.y,vx:(Math.random()-0.5)*8,vy:(Math.random()-0.5)*8,life:25,color:'#88ccff',size:2+Math.random()*4});}game.damageNumbers.push({x:item.x,y:item.y,text:'❄️冻结!',color:'#88ccff',life:50,vy:-2});break;case'airstrike':sfxAirstrike();game.screenShake=20;game.screenShakeIntensity=10;for(const e of game.enemies){damageEnemy(e,80,null,false);game.particles.push({x:e.x,y:e.y,vx:(Math.random()-0.5)*4,vy:-3-Math.random()*3,life:20,color:'#ff4400',size:3+Math.random()*5});}game.damageNumbers.push({x:item.x,y:item.y,text:'💣空袭!',color:'#ff6644',life:50,vy:-2});break;case'life_restore':game.lives=Math.min(game.maxLives,game.lives+1);game.damageNumbers.push({x:item.x,y:item.y,text:'+1❤️',color:'#ff4444',life:40,vy:-2});break;case'speed_boost':game.speedBoostActive=480;sfxGoldenTime();game.damageNumbers.push({x:item.x,y:item.y,text:'⚡加速!',color:'#ffff00',life:50,vy:-2});break;case'shield':game.shieldActive=300;sfxShield();game.damageNumbers.push({x:item.x,y:item.y,text:'🛡️护盾!',color:'#4488ff',life:50,vy:-2});break;}}
+function updateDroppedItems(){for(const item of game.droppedItems){item.life-=deltaTime;if(game.hero&&!game.hero.dead&&dist(game.hero,item)<CELL_SIZE*0.8){pickupItem(item);item.dead=true;}}game.droppedItems=game.droppedItems.filter(item=>!item.dead);}
+
+// ============================================================
+// 🔥 ACTIVE SKILL SYSTEM
+// ============================================================
+function useActiveSkill(idx){if(game.activeSkillCDs[idx]>0)return;const skill=ACTIVE_SKILLS[idx];switch(skill.id){case'airstrike':game.airstrikeTargeting=true;return;case'blizzard':sfxBlizzard();game.blizzardActive=300;for(const e of game.enemies){e.blizzarded=true;}game.damageNumbers.push({x:canvas.width/2,y:canvas.height/2,text:'❄️暴风雪!',color:'#88ccff',life:80,vy:-1});break;case'golden_time':sfxGoldenTime();game.goldenTimeActive=600;game.damageNumbers.push({x:canvas.width/2,y:canvas.height/2,text:'💰黄金时刻!',color:'#ffdd00',life:80,vy:-1});break;}game.activeSkillCDs[idx]=skill.cooldown;}
+function executeAirstrike(tx,ty){if(!game.airstrikeTargeting)return;game.airstrikeTargeting=false;game.activeSkillCDs[0]=ACTIVE_SKILLS[0].cooldown;sfxAirstrike();game.screenShake=25;game.screenShakeIntensity=12;const aoeRadius=CELL_SIZE*3;for(const e of game.enemies){if(dist({x:tx,y:ty},e)<aoeRadius){damageEnemy(e,150,null,false);}}for(let i=0;i<30;i++){const ang=Math.random()*Math.PI*2;const r=Math.random()*aoeRadius;game.particles.push({x:tx+Math.cos(ang)*r,y:ty+Math.sin(ang)*r,vx:(Math.random()-0.5)*3,vy:-2-Math.random()*5,life:20+Math.random()*15,color:'#ff4400',size:3+Math.random()*6});}game.damageNumbers.push({x:tx,y:ty-20,text:'💣空袭打击!',color:'#ff6644',life:60,vy:-2});}
+function updateActiveSkills(){for(let i=0;i<game.activeSkillCDs.length;i++){if(game.activeSkillCDs[i]>0)game.activeSkillCDs[i]-=deltaTime;}if(game.goldenTimeActive>0)game.goldenTimeActive-=deltaTime;if(game.speedBoostActive>0)game.speedBoostActive-=deltaTime;if(game.shieldActive>0)game.shieldActive-=deltaTime;if(game.blizzardActive>0)game.blizzardActive-=deltaTime;}
+
+// ============================================================
+// ♾️ ENDLESS MODE
+// ============================================================
+function startEndlessMode(){game.isEndless=true;game.endlessBossCounter=0;game.wave=game.totalWaves;game.waveActive=false;game.waveComplete=true;game.prepTimer=game.prepDuration;game.skillPanelVisible=false;game.stateBeforeEndless=gameState;gameState=GS.PLAYING;game.waveTransition=90;game.waveTransitionText='♾️ 无尽模式';sfxWaveTransition();}
+function getEndlessEnemySpeedMult(){if(!game.isEndless)return 1.0;const extraWaves=game.wave-game.totalWaves;return 1.0+Math.floor(extraWaves/10)*0.10;}
+
+// ============================================================
+// 🏆 ACHIEVEMENT SYSTEM
+// ============================================================
+function loadAchievements(){try{const d=JSON.parse(localStorage.getItem('zombieDefense_achievements'));game.achievements=d||{};}catch(e){game.achievements={};}}
+function saveAchievements(){try{localStorage.setItem('zombieDefense_achievements',JSON.stringify(game.achievements));}catch(e){}}
+function checkAchievements(){for(const ach of ACHIEVEMENTS){if(game.achievements[ach.id])continue;if(ach.condition()){game.achievements[ach.id]={completed:true,time:Date.now()};game.achievementPopup={ach,timer:120};sfxAchievement();saveAchievements();break;}}}
+function getAchievementProgress(ach){if(game.achievements[ach.id]&&game.achievements[ach.id].completed)return{current:ach.target,target:ach.target,done:true};let current=0;switch(ach.trackedKey){case'waveReached':current=game.wave;break;case'towersBuilt':current=game.towersBuilt;break;case'bossKills':current=game.bossKills;break;case'totalGoldEarned':current=game.totalGoldEarned;break;case'critKills':current=game.critKills;break;case'skillsCollected':current=game.skillsCollected;break;case'endlessBestWave':current=Math.max(game.wave,saveData.endlessBest||0);break;case'perfectWave':current=(game.lives===game.maxLives&&!game.waveActive)?game.wave:0;break;}return{current:Math.min(current,ach.target),target:ach.target,done:false};}
+
+// ============================================================
+// 🎨 SCREEN SHAKE & WEATHER
+// ============================================================
+function updateScreenShake(){if(game.screenShake>0)game.screenShake-=deltaTime;}
+function getShakeOffset(){if(game.screenShake<=0)return{x:0,y:0};const intensity=game.screenShakeIntensity*(game.screenShake/25);return{x:(Math.random()-0.5)*intensity*2,y:(Math.random()-0.5)*intensity*2};}
+
+// ============================================================
+// RENDER: MAP & GRID
+// ============================================================
+function drawMap(){
+  const lv = levelDefs[currentLevel];
+  // Background
+  ctx.fillStyle = lv.bgColor;
+  ctx.fillRect(MAP_X, MAP_Y, GRID_COLS*CELL_SIZE, GRID_ROWS*CELL_SIZE);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 0.5;
+  for(let c=0;c<=GRID_COLS;c++){
+    ctx.beginPath();
+    ctx.moveTo(MAP_X+c*CELL_SIZE, MAP_Y);
+    ctx.lineTo(MAP_X+c*CELL_SIZE, MAP_Y+GRID_ROWS*CELL_SIZE);
+    ctx.stroke();
+  }
+  for(let r=0;r<=GRID_ROWS;r++){
+    ctx.beginPath();
+    ctx.moveTo(MAP_X, MAP_Y+r*CELL_SIZE);
+    ctx.lineTo(MAP_X+GRID_COLS*CELL_SIZE, MAP_Y+r*CELL_SIZE);
+    ctx.stroke();
+  }
+
+  // Path tiles
+  for(const p of game.pathWaypoints){
+    const px = MAP_X + p.x*CELL_SIZE;
+    const py = MAP_Y + p.y*CELL_SIZE;
+    ctx.fillStyle = 'rgba(80,70,60,0.5)';
+    ctx.fillRect(px+1, py+1, CELL_SIZE-2, CELL_SIZE-2);
+    ctx.strokeStyle = 'rgba(120,100,80,0.4)';
+    ctx.strokeRect(px+1, py+1, CELL_SIZE-2, CELL_SIZE-2);
+  }
+
+  // Path direction arrows
+  for(let i=1;i<game.pathWaypoints.length;i++){
+    const prev = game.pathWaypoints[i-1];
+    const curr = game.pathWaypoints[i];
+    const c1 = cellCenter(prev.x, prev.y);
+    const c2 = cellCenter(curr.x, curr.y);
+    const mx = (c1.x+c2.x)/2, my = (c1.y+c2.y)/2;
+    ctx.fillStyle = 'rgba(150,130,100,0.3)';
+    ctx.beginPath();
+    ctx.arc(mx, my, 3, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Entry marker
+  const entry = cellCenter(game.pathWaypoints[0].x, game.pathWaypoints[0].y);
+  ctx.fillStyle = '#4caf50';
+  ctx.beginPath();
+  ctx.moveTo(entry.x-CELL_SIZE/2, entry.y-CELL_SIZE/3);
+  ctx.lineTo(entry.x-CELL_SIZE/2, entry.y+CELL_SIZE/3);
+  ctx.lineTo(entry.x-CELL_SIZE/6, entry.y+CELL_SIZE/3);
+  ctx.lineTo(entry.x-CELL_SIZE/6, entry.y-CELL_SIZE/3);
+  ctx.fill();
+  ctx.fillStyle = '#4caf50';
+  ctx.font = `${CELL_SIZE*0.35}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('入口', entry.x, entry.y-CELL_SIZE/2-4);
+
+  // Base marker
+  const baseC = cellCenter(game.basePos.x, game.basePos.y);
+  // Glow
+  const glowAlpha = 0.3 + Math.sin(frameCount*0.05)*0.1;
+  ctx.fillStyle = `rgba(0,150,255,${glowAlpha})`;
+  ctx.beginPath();
+  ctx.arc(baseC.x, baseC.y, CELL_SIZE*0.6, 0, Math.PI*2);
+  ctx.fill();
+  // Base building
+  ctx.fillStyle = '#1a6dd4';
+  ctx.fillRect(baseC.x-CELL_SIZE*0.3, baseC.y-CELL_SIZE*0.3, CELL_SIZE*0.6, CELL_SIZE*0.6);
+  ctx.strokeStyle = '#4da6ff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(baseC.x-CELL_SIZE*0.3, baseC.y-CELL_SIZE*0.3, CELL_SIZE*0.6, CELL_SIZE*0.6);
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL_SIZE*0.35}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('🏠', baseC.x, baseC.y+CELL_SIZE*0.12);
+  ctx.fillText('基地', baseC.x, baseC.y+CELL_SIZE/2+14);
+
+  // Buildable cells highlight on hover
+  if(game.hoveredCell && isBuildable(game.hoveredCell.col, game.hoveredCell.row) && gameState===GS.PLAYING){
+    const hx = MAP_X + game.hoveredCell.col*CELL_SIZE;
+    const hy = MAP_Y + game.hoveredCell.row*CELL_SIZE;
+    ctx.fillStyle = game.selectedTowerType>=0 ? 'rgba(100,255,100,0.3)' : 'rgba(255,255,255,0.1)';
+    ctx.fillRect(hx, hy, CELL_SIZE, CELL_SIZE);
+    ctx.strokeStyle = game.selectedTowerType>=0 ? '#66ff66' : 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(hx+0.5, hy+0.5, CELL_SIZE-1, CELL_SIZE-1);
+  }
+
+  // Highlight path under hover (for debugging)
+  if(game.hoveredCell && isPathCell(game.hoveredCell.col, game.hoveredCell.row)){
+    const hx = MAP_X + game.hoveredCell.col*CELL_SIZE;
+    const hy = MAP_Y + game.hoveredCell.row*CELL_SIZE;
+    ctx.fillStyle = 'rgba(255,0,0,0.15)';
+    ctx.fillRect(hx, hy, CELL_SIZE, CELL_SIZE);
+  }
+}
+
+// ============================================================
+// RENDER: TOWERS
+// ============================================================
+function drawTowers(){
+  for(const t of game.towers){
+    const def = TOWER_TYPES[t.type];
+    const tx = t.x, ty = t.y;
+    const half = CELL_SIZE*0.35;
+
+    // Range circle (when hovered or selected)
+    if(game.hoveredCell && game.hoveredCell.col===t.col && game.hoveredCell.row===t.row){
+      const rng = getTowerRange(t) * CELL_SIZE;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath();
+      ctx.arc(tx, ty, rng, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Tower base
+    ctx.fillStyle = def.color;
+    ctx.fillRect(tx-half, ty-half, half*2, half*2);
+
+    // Tower top (smaller, centered)
+    const topHalf = half*0.65;
+    const lvl = t.level;
+    const topColor = lvl===2?'#ffaa00':lvl===3?'#ff44aa':lvl===4?'#aa00ff':def.color;
+    ctx.fillStyle = topColor;
+    ctx.beginPath();
+    ctx.arc(tx, ty, topHalf, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Icon
+    ctx.fillStyle = '#fff';
+    ctx.font = `${CELL_SIZE*0.38}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(def.icon, tx, ty);
+
+    // Level stars
+    for(let i=1;i<t.level;i++){
+      ctx.fillStyle = '#ffdd00';
+      ctx.font = `${CELL_SIZE*0.2}px 'Microsoft YaHei'`;
+      ctx.fillText('⭐', tx-half+(i-0.5)*half*1.3, ty-half-4);
+    }
+
+    // HP bar for tower? No, upgrade indicator instead
+  }
+}
+
+// ============================================================
+// RENDER: ENEMIES
+// ============================================================
+function drawEnemies(){
+  for(const e of game.enemies){
+    const floatY = Math.sin(frameCount*0.06+e.floatOff)*2;
+    const ex = e.x, ey = e.y + floatY;
+    const s = e.size;
+
+    // Boss glow
+    if(e.type==='boss'){
+      e.bossGlow = (e.bossGlow||0) + 0.05;
+      const glowR = s*1.2 + Math.sin(e.bossGlow)*s*0.3;
+      const grad = ctx.createRadialGradient(ex, ey, s*0.5, ex, ey, glowR);
+      grad.addColorStop(0, 'rgba(255,50,50,0.4)');
+      grad.addColorStop(1, 'rgba(255,50,50,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(ex, ey, glowR, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // Body
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.arc(ex, ey, s, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(ex-s*0.3, ey-s*0.2, s*0.25, 0, Math.PI*2);
+    ctx.arc(ex+s*0.3, ey-s*0.2, s*0.25, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(ex-s*0.3, ey-s*0.2, s*0.12, 0, Math.PI*2);
+    ctx.arc(ex+s*0.3, ey-s*0.2, s*0.12, 0, Math.PI*2);
+    ctx.fill();
+
+    // Mouth
+    ctx.strokeStyle = '#330000';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(ex, ey+s*0.15, s*0.35, 0.1*Math.PI, 0.9*Math.PI);
+    ctx.stroke();
+
+    // Boss crown
+    if(e.type==='boss'){
+      ctx.fillStyle = '#ffdd00';
+      ctx.font = `${s*0.8}px 'Microsoft YaHei'`;
+      ctx.textAlign = 'center';
+      ctx.fillText('👑', ex, ey-s*1.1);
+    }
+
+    // Status effect indicators
+    if(e.slowTimer > 0){
+      ctx.strokeStyle = '#88ccff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(ex, ey, s+2, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    if(e.burnTimer > 0){
+      ctx.strokeStyle = '#ff4400';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(ex, ey, s+3, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    if(e.poisonTimer > 0){
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(ex, ey, s+4, 0, Math.PI*2);
+      ctx.setLineDash([3,3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // HP bar
+    if(e.hp < e.maxHp){
+      const barW = s*1.5;
+      const barH = 3;
+      const barY = ey - s - 8;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(ex-barW/2, barY, barW, barH);
+      const hpRatio = e.hp / e.maxHp;
+      const hpColor = hpRatio>0.5?'#4caf50':hpRatio>0.25?'#ff9800':'#f44336';
+      ctx.fillStyle = hpColor;
+      ctx.fillRect(ex-barW/2, barY, barW*hpRatio, barH);
+    }
+  }
+}
+
+// ============================================================
+// RENDER: BULLETS, PARTICLES, DAMAGE NUMBERS
+// ============================================================
+function drawBullets(){
+  for(const b of game.bullets){
+    ctx.fillStyle = b.color;
+    ctx.shadowColor = b.color;
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 3, 0, Math.PI*2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+function drawParticles(){
+  for(const p of game.particles){
+    if(p.isChain){
+      // Lightning bolt visual
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#ffff00';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      const midX = (p.x+p.target.x)/2 + (Math.random()-0.5)*20;
+      const midY = (p.y+p.target.y)/2 + (Math.random()-0.5)*20;
+      ctx.lineTo(midX, midY);
+      ctx.lineTo(p.target.x, p.target.y);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    } else {
+      const alpha = Math.min(1, p.life/15);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+function drawDamageNumbers(){
+  for(const d of game.damageNumbers){
+    const alpha = Math.min(1, d.life/20);
+    ctx.fillStyle = d.color;
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 13px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText(d.text, d.x, d.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// RENDER: TOWER MENU
+// ============================================================
+function drawTowerMenu(){
+  if(!game.towerMenu) return;
+  const {col, row} = game.towerMenu;
+  const cx = MAP_X + col*CELL_SIZE + CELL_SIZE/2;
+  const cy = MAP_Y + row*CELL_SIZE + CELL_SIZE/2;
+
+  const menuW = CELL_SIZE*4.5;
+  const menuH = CELL_SIZE*3.5;
+  let mx = cx - menuW/2;
+  let my = cy - menuH - 10;
+
+  // Clamp to screen
+  if(mx < MAP_X) mx = MAP_X + 5;
+  if(my < MAP_Y) my = MAP_Y + 5;
+  if(mx+menuW > MAP_X+GRID_COLS*CELL_SIZE) mx = MAP_X+GRID_COLS*CELL_SIZE-menuW-5;
+  if(my+menuH > MAP_Y+GRID_ROWS*CELL_SIZE) my = cy + 15;
+
+  // Background
+  ctx.fillStyle = 'rgba(20,20,30,0.95)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 2;
+  roundRect(mx, my, menuW, menuH, 8);
+  ctx.fill();
+  ctx.stroke();
+
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL_SIZE*0.35}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('选择防御塔', mx+menuW/2, my+CELL_SIZE*0.5);
+
+  // Tower icons
+  const iconSize = CELL_SIZE*0.7;
+  const startX = mx + (menuW - 5*iconSize - 4*8)/2;
+  for(let i=0;i<5;i++){
+    const def = TOWER_TYPES[i];
+    const ix = startX + i*(iconSize+8);
+    const iy = my + CELL_SIZE*0.75;
+    const canAfford = game.gold >= def.cost;
+
+    // Card
+    ctx.fillStyle = canAfford ? 'rgba(40,40,55,0.9)' : 'rgba(30,20,20,0.9)';
+    ctx.strokeStyle = canAfford ? def.color : '#555';
+    ctx.lineWidth = 1;
+    roundRect(ix, iy, iconSize, iconSize, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // Icon
+    ctx.fillStyle = '#fff';
+    ctx.font = `${iconSize*0.5}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(def.icon, ix+iconSize/2, iy+iconSize/2-2);
+
+    // Name
+    ctx.fillStyle = canAfford ? '#ccc' : '#666';
+    ctx.font = `${CELL_SIZE*0.2}px 'Microsoft YaHei'`;
+    ctx.fillText(def.name, ix+iconSize/2, iy+iconSize+CELL_SIZE*0.25);
+
+    // Cost
+    ctx.fillStyle = canAfford ? '#ffdd00' : '#ff4444';
+    ctx.font = `${CELL_SIZE*0.22}px 'Microsoft YaHei'`;
+    ctx.fillText(`💰${def.cost}`, ix+iconSize/2, iy+iconSize+CELL_SIZE*0.48);
+  }
+
+  // Tip
+  ctx.fillStyle = '#666';
+  ctx.font = `${CELL_SIZE*0.2}px 'Microsoft YaHei'`;
+  ctx.fillText('右键空地或按ESC关闭', mx+menuW/2, my+menuH-CELL_SIZE*0.3);
+}
+
+// ============================================================
+// RENDER: TOWER INFO PANEL
+// ============================================================
+function drawTowerInfo(tower){
+  if(!tower) return;
+  const def = TOWER_TYPES[tower.type];
+  const tx = tower.x, ty = tower.y;
+
+  // Range circle for selected tower
+  const rng = getTowerRange(tower) * CELL_SIZE;
+  ctx.fillStyle = 'rgba(255,255,100,0.08)';
+  ctx.beginPath();
+  ctx.arc(tx, ty, rng, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,100,0.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5,5]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Info panel
+  const pw = CELL_SIZE*3.5, ph = CELL_SIZE*(tower.level<4?3.2:2.5);
+  let px = tx - pw/2, py = ty - CELL_SIZE - ph - 10;
+  if(px < MAP_X) px = MAP_X+5;
+  if(py < MAP_Y) py = ty + CELL_SIZE + 5;
+  if(px+pw > MAP_X+GRID_COLS*CELL_SIZE) px = MAP_X+GRID_COLS*CELL_SIZE-pw-5;
+
+  ctx.fillStyle = 'rgba(10,10,20,0.93)';
+  ctx.strokeStyle = def.color;
+  ctx.lineWidth = 1.5;
+  roundRect(px, py, pw, ph, 6);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = def.color;
+  ctx.font = `bold ${CELL_SIZE*0.28}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'left';
+  ctx.fillText(`${def.icon} ${def.name} Lv.${tower.level}`, px+8, py+CELL_SIZE*0.4);
+
+  const dmg = Math.round(getTowerDamage(tower));
+  const rate = Math.round(60/getTowerFireRate(tower)*10)/10;
+  ctx.fillStyle = '#ccc';
+  ctx.font = `${CELL_SIZE*0.23}px 'Microsoft YaHei'`;
+  ctx.fillText(`伤害:${dmg} | 射速:${rate}/s | 射程:${getTowerRange(tower).toFixed(1)}`, px+8, py+CELL_SIZE*0.75);
+
+  // Sell button
+  let refund = TOWER_TYPES[tower.type].cost;
+  for(let i=1;i<tower.level;i++) refund += TOWER_TYPES[tower.type].upgrades[i-1].cost;
+  refund = Math.floor(refund*0.6);
+  ctx.fillStyle = '#ff6666';
+  ctx.fillText(`💔 出售(+${refund}) (右键/双击)`, px+8, py+CELL_SIZE*1.05);
+
+  // Upgrade button
+  if(tower.level < 4){
+    const upg = def.upgrades[tower.level-1];
+    const canUpg = game.gold >= upg.cost;
+    ctx.fillStyle = canUpg ? '#ffdd00' : '#666';
+    ctx.fillText(`⬆ 升级 Lv.${tower.level+1} (💰${upg.cost})`, px+8, py+CELL_SIZE*1.35);
+
+    // Upgrade preview
+    const newDmg = Math.round(dmg * upg.dmgMul);
+    ctx.fillStyle = '#999';
+    ctx.fillText(`→ 伤害:${newDmg}`, px+8, py+CELL_SIZE*1.65);
+  }
+}
+
+// ============================================================
+// RENDER: HUD
+// ============================================================
+function drawHUD(){
+  const hudY = 5;
+  const hudH = 55;
+
+  // Background
+  ctx.fillStyle = 'rgba(10,10,20,0.9)';
+  ctx.fillRect(0, 0, canvas.width, hudH+10);
+
+  // Border
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, hudH+10);
+  ctx.lineTo(canvas.width, hudH+10);
+  ctx.stroke();
+
+  const items = [
+    { label:'波次', value:`${game.wave}/${game.totalWaves}`, color:'#ffdd57' },
+    { label:'生命', value:`❤️ ${game.lives}/${game.maxLives}`, color: game.lives<=3?'#ff4444':'#4caf50' },
+    { label:'金币', value:`💰 ${Math.floor(game.gold)}`, color:'#ffdd00' },
+    { label:'分数', value:`🏆 ${game.score}`, color:'#ff9800' },
+    { label:'击杀', value:`💀 ${game.kills}`, color:'#aaa' },
+    { label:'敌人', value:`👾 ${game.enemiesRemaining}`, color: game.enemiesRemaining>10?'#ff9800':'#aaa' },
+  ];
+
+  const itemW = canvas.width / items.length;
+  for(let i=0;i<items.length;i++){
+    const it = items[i];
+    const ix = i*itemW + itemW/2;
+    ctx.fillStyle = '#999';
+    ctx.font = `${Math.min(12, CELL_SIZE*0.3)}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(it.label, ix, hudY+16);
+    ctx.fillStyle = it.color;
+    ctx.font = `bold ${Math.min(16, CELL_SIZE*0.38)}px 'Microsoft YaHei'`;
+    ctx.fillText(it.value, ix, hudY+38);
+  }
+
+  // Tower shortcut bar
+  const barY = hudY + hudH + 2;
+  const barH = CELL_SIZE*1.1;
+  const barW = TOWER_TYPES.length*(CELL_SIZE*1.1+4)+4;
+  const barX = canvas.width/2 - barW/2;
+
+  ctx.fillStyle = 'rgba(10,10,20,0.85)';
+  roundRect(barX, barY, barW, barH, 6);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  for(let i=0;i<TOWER_TYPES.length;i++){
+    const def = TOWER_TYPES[i];
+    const tx = barX + 4 + i*(CELL_SIZE*1.1+4);
+    const th = barH-8;
+    const selected = game.selectedTowerType === i;
+    const canAfford = game.gold >= def.cost;
+
+    ctx.fillStyle = selected ? 'rgba(255,255,100,0.3)' : (canAfford?'rgba(40,40,55,0.8)':'rgba(30,20,20,0.8)');
+    ctx.strokeStyle = selected ? '#ffdd00' : def.color;
+    ctx.lineWidth = selected ? 2 : 1;
+    roundRect(tx, barY+4, CELL_SIZE*1.1, th, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `${CELL_SIZE*0.45}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(def.icon, tx+CELL_SIZE*1.1/2, barY+4+th/2-2);
+    ctx.fillStyle = canAfford?'#ddd':'#666';
+    ctx.font = `${CELL_SIZE*0.18}px 'Microsoft YaHei'`;
+    ctx.fillText(`💰${def.cost}`, tx+CELL_SIZE*1.1/2, barY+4+th-4);
+  }
+}
+
+// ============================================================
+// RENDER: WAVE BUTTON & PREP PHASE
+// ============================================================
+function drawWaveButton(){
+  if(game.waveActive) return;
+  if(game.skillPanelVisible) return;
+
+  const bw = CELL_SIZE*3.5, bh = CELL_SIZE*1.2;
+  const bx = canvas.width - bw - 15;
+  const by = 62;
+
+  // Button
+  const btnColor = game.waveComplete ? '#4caf50' : '#2196f3';
+  ctx.fillStyle = btnColor;
+  roundRect(bx, by, bw, bh, 8);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Text
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL_SIZE*0.32}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  if(game.wave >= game.totalWaves){
+    ctx.fillText('🏆 胜利!', bx+bw/2, by+bh/2+4);
+  } else if(game.wave === 0){
+    ctx.fillText('⚔️ 开始第1波', bx+bw/2, by+bh/2+4);
+  } else {
+    const isBoss = (game.wave+1)%5===0;
+    ctx.fillText(`${isBoss?'⚠️ ':''}开始第${game.wave+1}波`, bx+bw/2, by+bh/2+4);
+  }
+
+  // Prep countdown
+  if(game.wave > 0 && game.prepTimer > 0 && !game.waveActive){
+    const sec = Math.ceil(game.prepTimer/60);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.font = `bold ${CELL_SIZE*0.8}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`${sec}`, canvas.width/2, MAP_Y+MAP_HEIGHT/2);
+    ctx.fillStyle = '#fff';
+    ctx.font = `${CELL_SIZE*0.25}px 'Microsoft YaHei'`;
+    ctx.fillText('准备中...点击按钮开始下一波', canvas.width/2, MAP_Y+MAP_HEIGHT/2+CELL_SIZE*0.6);
+  }
+}
+
+// ============================================================
+// RENDER: BOSS WARNING
+// ============================================================
+function drawBossWarning(){
+  if(game.bossWarning <= 0) return;
+  const alpha = Math.abs(Math.sin(frameCount*0.1));
+  ctx.fillStyle = `rgba(255,0,0,${alpha*0.3})`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = `rgba(255,50,50,${alpha})`;
+  ctx.font = `bold ${CELL_SIZE*0.9}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('⚠️ BOSS 来袭！⚠️', canvas.width/2, canvas.height/2-30);
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `${CELL_SIZE*0.35}px 'Microsoft YaHei'`;
+  ctx.fillText('准备你的防线！', canvas.width/2, canvas.height/2+20);
+}
+
+// ============================================================
+// RENDER: SKILL PANEL
+// ============================================================
+function drawSkillPanel(){
+  if(!game.skillPanelVisible) return;
+
+  // Overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const panelW = Math.min(canvas.width*0.85, 700);
+  const panelH = CELL_SIZE*5;
+  const px = canvas.width/2 - panelW/2;
+  const py = canvas.height/2 - panelH/2;
+
+  // Panel bg
+  ctx.fillStyle = 'rgba(20,15,30,0.95)';
+  ctx.strokeStyle = 'rgba(255,215,0,0.5)';
+  ctx.lineWidth = 2;
+  roundRect(px, py, panelW, panelH, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  // Title
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE*0.45}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('🎴 选择一项技能强化！', canvas.width/2, py+CELL_SIZE*0.7);
+
+  // Wave complete text
+  ctx.fillStyle = '#aaa';
+  ctx.font = `${CELL_SIZE*0.28}px 'Microsoft YaHei'`;
+  ctx.fillText(`第 ${game.wave} 波完成！`, canvas.width/2, py+CELL_SIZE*1.05);
+
+  // Cards
+  const cardW = panelW*0.28;
+  const cardH = panelH*0.55;
+  const cardGap = panelW*0.03;
+  const cardStartX = px + (panelW - 3*cardW - 2*cardGap)/2;
+  const cardY = py + panelH - cardH - CELL_SIZE*0.3;
+
+  for(let i=0;i<game.skillChoices.length;i++){
+    const skill = game.skillChoices[i];
+    const cx = cardStartX + i*(cardW+cardGap);
+
+    // Card bg
+    ctx.fillStyle = 'rgba(30,25,40,0.9)';
+    ctx.strokeStyle = skill.color;
+    ctx.lineWidth = 2;
+    roundRect(cx, cardY, cardW, cardH, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    // Rarity badge
+    const rarityColors = { common:'#888', rare:'#6688ff', epic:'#aa66ff', legendary:'#ffaa00' };
+    ctx.fillStyle = rarityColors[skill.rarity] || '#888';
+    ctx.font = `${CELL_SIZE*0.18}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    const rarityName = { common:'普通', rare:'稀有', epic:'史诗', legendary:'传说' };
+    ctx.fillText(rarityName[skill.rarity], cx+cardW/2, cardY+CELL_SIZE*0.35);
+
+    // Icon
+    ctx.font = `${CELL_SIZE*0.6}px 'Microsoft YaHei'`;
+    ctx.fillText(skill.icon, cx+cardW/2, cardY+CELL_SIZE*0.85);
+
+    // Name
+    ctx.fillStyle = skill.color;
+    ctx.font = `bold ${CELL_SIZE*0.3}px 'Microsoft YaHei'`;
+    ctx.fillText(skill.name, cx+cardW/2, cardY+CELL_SIZE*1.2);
+
+    // Description (wrap)
+    ctx.fillStyle = '#ccc';
+    ctx.font = `${CELL_SIZE*0.21}px 'Microsoft YaHei'`;
+    const desc = skill.desc;
+    ctx.fillText(desc, cx+cardW/2, cardY+CELL_SIZE*1.55);
+
+    // Key hint
+    ctx.fillStyle = '#888';
+    ctx.font = `${CELL_SIZE*0.22}px 'Microsoft YaHei'`;
+    ctx.fillText(`按 ${i+1} 选择`, cx+cardW/2, cardY+cardH-CELL_SIZE*0.25);
+  }
+}
+
+// ============================================================
+// RENDER: GAME OVER / VICTORY
+// ============================================================
+function drawGameOverPanel(){
+  if(gameState !== GS.GAME_OVER && gameState !== GS.VICTORY) return;
+
+  const isWin = gameState === GS.VICTORY;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const pw = Math.min(canvas.width*0.7, 500);
+  const ph = CELL_SIZE*5.5;
+  const px = canvas.width/2 - pw/2;
+  const py = canvas.height/2 - ph/2;
+
+  ctx.fillStyle = 'rgba(20,15,30,0.95)';
+  ctx.strokeStyle = isWin ? '#ffdd00' : '#ff4444';
+  ctx.lineWidth = 2;
+  roundRect(px, py, pw, ph, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = isWin ? '#ffdd00' : '#ff4444';
+  ctx.font = `bold ${CELL_SIZE*0.6}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText(isWin ? '🎉 胜利！' : '💀 防线崩溃！', canvas.width/2, py+CELL_SIZE*0.9);
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = `${CELL_SIZE*0.3}px 'Microsoft YaHei'`;
+  ctx.fillText(`关卡: ${levelDefs[currentLevel].name}`, canvas.width/2, py+CELL_SIZE*1.5);
+  ctx.fillText(`存活波次: ${game.wave}/${game.totalWaves}`, canvas.width/2, py+CELL_SIZE*1.9);
+  ctx.fillText(`击杀数: ${game.kills}  |  得分: ${game.score}`, canvas.width/2, py+CELL_SIZE*2.3);
+  ctx.fillText(`最高分: ${saveData.scores[currentLevel]}`, canvas.width/2, py+CELL_SIZE*2.7);
+
+  // Buttons
+  const bW = pw*0.35, bH = CELL_SIZE*0.9;
+  const bY = py + ph - bH - CELL_SIZE*1.2;
+
+  // Retry
+  ctx.fillStyle = '#2196f3';
+  roundRect(px+pw*0.1, bY, bW, bH, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL_SIZE*0.28}px 'Microsoft YaHei'`;
+  ctx.fillText('🔄 重新挑战', px+pw*0.1+bW/2, bY+bH/2+4);
+  // Endless mode button on victory
+  if(isWin && game.wave>=game.totalWaves && !game.isEndless){
+    const ebW = pw*0.5, ebH = CELL_SIZE*0.8;
+    const ebX = px + (pw-ebW)/2;
+    const ebY = bY - ebH - 10;
+    ctx.fillStyle = '#cc44ff';
+    roundRect(ebX, ebY, ebW, ebH, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = ;
+    ctx.fillText('♾️ 进入无尽模式', ebX+ebW/2, ebY+ebH/2+4);
+  }
+
+  // Level select
+  ctx.fillStyle = '#ff9800';
+  roundRect(px+pw*0.55, bY, bW, bH, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText('🗺️ 关卡选择', px+pw*0.55+bW/2, bY+bH/2+4);
+}
+
+// ============================================================
+// RENDER: LEVEL SELECT
+// ============================================================
+function drawLevelSelect(){
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Stars background
+  for(let i=0;i<50;i++){
+    const sx = ((i*137+89)%canvas.width);
+    const sy = ((i*251+43)%canvas.height);
+    ctx.fillStyle = `rgba(255,255,255,${0.1+Math.sin(frameCount*0.02+i)*0.05})`;
+    ctx.fillRect(sx, sy, 1.5, 1.5);
+  }
+
+  // Title
+  ctx.fillStyle = '#ff4444';
+  ctx.font = `bold ${Math.min(48, CELL_SIZE*1.3)}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('🧟 僵尸防线', canvas.width/2, canvas.height*0.12);
+
+  ctx.fillStyle = '#999';
+  ctx.font = `${Math.min(18, CELL_SIZE*0.5)}px 'Microsoft YaHei'`;
+  ctx.fillText('塔防 + Roguelike 技能', canvas.width/2, canvas.height*0.18);
+
+  // Level cards
+  const cardW = Math.min(canvas.width*0.26, 200);
+  const cardH = cardW*1.45;
+  const gap = cardW*0.15;
+  const totalW = 3*cardW + 2*gap;
+  const startX = canvas.width/2 - totalW/2;
+  const cardY = canvas.height*0.28;
+
+  for(let i=0;i<3;i++){
+    const lv = levelDefs[i];
+    const cx = startX + i*(cardW+gap);
+
+    // Card
+    const grad = ctx.createLinearGradient(cx, cardY, cx, cardY+cardH);
+    grad.addColorStop(0, lv.bgColor);
+    grad.addColorStop(1, '#111');
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = lv.diffColor;
+    ctx.lineWidth = 2;
+    roundRect(cx, cardY, cardW, cardH, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    // Icon
+    ctx.font = `${cardW*0.35}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(lv.icon, cx+cardW/2, cardY+cardW*0.45);
+
+    // Name
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${cardW*0.13}px 'Microsoft YaHei'`;
+    ctx.fillText(lv.name, cx+cardW/2, cardY+cardW*0.65);
+
+    // Difficulty
+    ctx.fillStyle = lv.diffColor;
+    ctx.font = `${cardW*0.1}px 'Microsoft YaHei'`;
+    ctx.fillText(`难度: ${lv.difficulty}`, cx+cardW/2, cardY+cardW*0.8);
+
+    // High score
+    ctx.fillStyle = '#ffdd00';
+    ctx.font = `${cardW*0.1}px 'Microsoft YaHei'`;
+    ctx.fillText(`🏆 ${saveData.scores[i]}分`, cx+cardW/2, cardY+cardW*0.95);
+
+    // Completed
+    if(saveData.completed[i]){
+      ctx.fillStyle = '#4caf50';
+      ctx.font = `${cardW*0.12}px 'Microsoft YaHei'`;
+      ctx.fillText('✅ 已通关', cx+cardW/2, cardY+cardW*1.1);
+    }
+
+    // Best wave
+    if(saveData.waves[i]>0){
+      ctx.fillStyle = '#aaa';
+      ctx.font = `${cardW*0.09}px 'Microsoft YaHei'`;
+      ctx.fillText(`最佳: ${saveData.waves[i]}波`, cx+cardW/2, cardY+cardW*1.25);
+    }
+
+    // Play button
+    const btnW = cardW*0.7, btnH = cardW*0.18;
+    const btnX = cx+cardW/2-btnW/2;
+    const btnY = cardY+cardH-btnH-cardW*0.1;
+    ctx.fillStyle = lv.diffColor;
+    roundRect(btnX, btnY, btnW, btnH, 6);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${cardW*0.1}px 'Microsoft YaHei'`;
+    ctx.fillText('🎮 开始游戏', btnX+btnW/2, btnY+btnH/2+4);
+  }
+
+  // Footer
+  ctx.fillStyle = '#555';
+  ctx.font = `${CELL_SIZE*0.3}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('点击关卡卡片开始游戏 | 🖱️ 左键建造 🖱️ 右键出售', canvas.width/2, canvas.height*0.88);
+}
+
+// ============================================================
+// RENDER: PAUSE OVERLAY
+// ============================================================
+function drawPauseOverlay(){
+  if(gameState !== GS.PAUSED) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL_SIZE*0.7}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('⏸️ 游戏暂停', canvas.width/2, canvas.height/2-20);
+  ctx.fillStyle = '#aaa';
+  ctx.font = `${CELL_SIZE*0.3}px 'Microsoft YaHei'`;
+  ctx.fillText('按 ESC 或 P 继续', canvas.width/2, canvas.height/2+25);
+}
+
+// ============================================================
+// RENDER: SKILLS LIST (sidebar)
+// ============================================================
+function drawSkillsList(){
+  if(game.skills.length===0) return;
+  const sx = MAP_X + GRID_COLS*CELL_SIZE + 5;
+  const sy = MAP_Y;
+  if(sx + 100 > canvas.width) return; // Not enough space
+
+  ctx.fillStyle = 'rgba(10,10,20,0.8)';
+  ctx.fillRect(sx, sy, canvas.width-sx-5, Math.min(game.skills.length*CELL_SIZE*0.45+20, GRID_ROWS*CELL_SIZE));
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(sx, sy, canvas.width-sx-5, Math.min(game.skills.length*CELL_SIZE*0.45+20, GRID_ROWS*CELL_SIZE));
+
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE*0.25}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'left';
+  ctx.fillText('已获技能:', sx+5, sy+CELL_SIZE*0.35);
+
+  for(let i=0;i<game.skills.length;i++){
+    const s = game.skills[i];
+    const iy = sy + CELL_SIZE*0.4 + i*CELL_SIZE*0.45 + CELL_SIZE*0.25;
+    if(iy > sy + GRID_ROWS*CELL_SIZE - 10) break;
+    ctx.fillStyle = s.color;
+    ctx.font = `${CELL_SIZE*0.2}px 'Microsoft YaHei'`;
+    ctx.fillText(`${s.icon} ${s.name}`, sx+5, iy);
+  }
+}
+
+// ============================================================
+// UTIL: ROUNDED RECT
+// ============================================================
+function roundRect(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y, x+w, y+r, r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y, x+r, y, r);
+  ctx.closePath();
+}
+
+
+// ============================================================
+// 🦸 RENDER: HERO
+// ============================================================
+function drawHero() {
+  if (!game.hero || !game.heroSelected) return;
+  const h = game.hero;
+  if (h.dead) return;
+  const def = getHeroDef();
+  if (!def) return;
+
+  // Aura glow
+  const glowAlpha = 0.2 + Math.sin(frameCount * 0.05) * 0.1;
+  const grad = ctx.createRadialGradient(h.x, h.y, h.size * 0.5, h.x, h.y, h.size * 2);
+  grad.addColorStop(0, def.color.replace(')', `,${glowAlpha + 0.2})`).replace('rgb', 'rgba'));
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, h.size * 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = def.color;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, h.size, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Icon
+  ctx.fillStyle = '#fff';
+  ctx.font = `${h.size * 1.2}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(def.icon, h.x, h.y);
+
+  // HP bar
+  const barW = h.size * 2;
+  const barH = 3;
+  const barY = h.y - h.size - 10;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(h.x - barW / 2, barY, barW, barH);
+  ctx.fillStyle = '#4caf50';
+  ctx.fillRect(h.x - barW / 2, barY, barW * (h.hp / h.maxHp), barH);
+
+  // Level
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE * 0.2}px 'Microsoft YaHei'`;
+  ctx.fillText(`Lv.${h.level}`, h.x, barY - 6);
+
+  // XP bar
+  const xpBarW = h.size * 2;
+  const xpBarH = 2;
+  const xpBarY = barY - 4;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(h.x - xpBarW / 2, xpBarY, xpBarW, xpBarH);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(h.x - xpBarW / 2, xpBarY, xpBarW * (h.xp / h.xpToNext), xpBarH);
+
+  // Target marker
+  if (h.moving) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(game.heroTargetX, game.heroTargetY, 6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Respawn timer indicator
+  if (h.dead && game.heroRespawnTimer > 0) {
+    ctx.fillStyle = 'rgba(255,0,0,0.7)';
+    ctx.font = `bold ${CELL_SIZE * 0.3}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    const respawnSec = Math.ceil(game.heroRespawnTimer / 60);
+    ctx.fillText(`💀复活:${respawnSec}s`, h.x, h.y);
+  }
+}
+
+// ============================================================
+// 🎁 RENDER: DROPPED ITEMS
+// ============================================================
+function drawDroppedItems() {
+  for (const item of game.droppedItems) {
+    const def = ITEM_TYPES.find(it => it.id === item.type);
+    if (!def) continue;
+    const floatY = Math.sin(frameCount * 0.06 + item.floatOff) * 3;
+    const iy = item.y + floatY;
+    const alpha = item.life < 120 ? item.life / 120 : 1;
+
+    // Glow
+    ctx.fillStyle = `rgba(255,255,255,${alpha * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(item.x, iy, 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Icon
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#fff';
+    ctx.font = `16px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(def.icon, item.x, iy);
+
+    // Blink effect when about to expire
+    if (item.life < 120 && Math.floor(item.life / 10) % 2 === 0) {
+      ctx.fillStyle = '#ff4444';
+      ctx.font = `10px 'Microsoft YaHei'`;
+      ctx.fillText('⏰', item.x, iy - 12);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// 🔥 RENDER: ACTIVE SKILL BUTTONS
+// ============================================================
+function drawActiveSkillButtons() {
+  if (gameState !== GS.PLAYING) return;
+  const btnSize = CELL_SIZE * 1.2;
+  const gap = 6;
+  const startX = canvas.width - btnSize - 12;
+  const startY = canvas.height - btnSize * 3 - gap * 2 - 15;
+
+  for (let i = 0; i < 3; i++) {
+    const skill = ACTIVE_SKILLS[i];
+    const bx = startX;
+    const by = startY + i * (btnSize + gap);
+    const cd = game.activeSkillCDs[i];
+    const ready = cd <= 0 && !game.airstrikeTargeting;
+
+    // Button background
+    ctx.fillStyle = ready ? 'rgba(30,30,50,0.85)' : 'rgba(20,20,30,0.7)';
+    ctx.strokeStyle = ready ? skill.color : '#555';
+    ctx.lineWidth = 2;
+    roundRect(bx, by, btnSize, btnSize, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    // Icon
+    ctx.fillStyle = ready ? '#fff' : '#666';
+    ctx.font = `${btnSize * 0.4}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(skill.icon, bx + btnSize / 2, by + btnSize / 2 - 4);
+
+    // Name
+    ctx.fillStyle = ready ? '#ccc' : '#555';
+    ctx.font = `${btnSize * 0.15}px 'Microsoft YaHei'`;
+    ctx.fillText(skill.name, bx + btnSize / 2, by + btnSize - 8);
+
+    // Cooldown overlay
+    if (cd > 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.beginPath();
+      ctx.arc(bx + btnSize / 2, by + btnSize / 2, btnSize / 2, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (cd / skill.cooldown), true);
+      ctx.lineTo(bx + btnSize / 2, by + btnSize / 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#fff';
+      ctx.font = `bold ${btnSize * 0.25}px 'Microsoft YaHei'`;
+      ctx.fillText(Math.ceil(cd / 60) + 's', bx + btnSize / 2, by + btnSize / 2);
+    }
+
+    // Hotkey
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = `${btnSize * 0.14}px 'Microsoft YaHei'`;
+    ctx.fillText('QWE'[i], bx + 4, by + 10);
+  }
+}
+
+// ============================================================
+// 🦸 RENDER: HERO SELECTION PANEL
+// ============================================================
+function drawHeroSelection() {
+  if (game.heroSelected || gameState !== GS.PLAYING) return;
+  if (game.wave > 0) return; // Only show at start
+
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const panelW = Math.min(canvas.width * 0.8, 640);
+  const panelH = CELL_SIZE * 5;
+  const px = canvas.width / 2 - panelW / 2;
+  const py = canvas.height / 2 - panelH / 2;
+
+  ctx.fillStyle = 'rgba(15,10,25,0.95)';
+  ctx.strokeStyle = '#ffdd00';
+  ctx.lineWidth = 2;
+  roundRect(px, py, panelW, panelH, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE * 0.45}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText('🦸 选择你的英雄指挥官', canvas.width / 2, py + CELL_SIZE * 0.6);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = `${CELL_SIZE * 0.25}px 'Microsoft YaHei'`;
+  ctx.fillText('点击空地移动英雄，英雄会自动攻击附近的敌人', canvas.width / 2, py + CELL_SIZE * 0.95);
+
+  const cardW = panelW * 0.22;
+  const cardH = panelH * 0.6;
+  const cardGap = panelW * 0.02;
+  const totalCardW = 4 * cardW + 3 * cardGap;
+  const cardStartX = px + (panelW - totalCardW) / 2;
+  const cardY = py + panelH - cardH - CELL_SIZE * 0.4;
+
+  for (let i = 0; i < HERO_TYPES.length; i++) {
+    const hero = HERO_TYPES[i];
+    const cx = cardStartX + i * (cardW + cardGap);
+
+    ctx.fillStyle = 'rgba(30,25,40,0.9)';
+    ctx.strokeStyle = hero.color;
+    ctx.lineWidth = 2;
+    roundRect(cx, cardY, cardW, cardH, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = `${cardW * 0.45}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
+    ctx.fillText(hero.icon, cx + cardW / 2, cardY + cardW * 0.35);
+
+    ctx.fillStyle = hero.color;
+    ctx.font = `bold ${cardW * 0.13}px 'Microsoft YaHei'`;
+    ctx.fillText(hero.name, cx + cardW / 2, cardY + cardW * 0.65);
+
+    ctx.fillStyle = '#ccc';
+    ctx.font = `${cardW * 0.1}px 'Microsoft YaHei'`;
+    const lines = hero.desc.split('，');
+    for (let li = 0; li < Math.min(lines.length, 2); li++) {
+      ctx.fillText(lines[li], cx + cardW / 2, cardY + cardW * 0.8 + li * cardW * 0.13);
+    }
+  }
+}
+
+// ============================================================
+// 🌤️ RENDER: WEATHER EFFECTS
+// ============================================================
+function drawWeatherEffects() {
+  if (!game.weather) return;
+  const w = game.weather;
+
+  if (w.id === 'rainy') {
+    ctx.strokeStyle = 'rgba(100,150,220,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 40; i++) {
+      const rx = ((i * 137 + frameCount * 3) % (GRID_COLS * CELL_SIZE)) + MAP_X;
+      const ry = ((i * 251 + frameCount * 5) % (GRID_ROWS * CELL_SIZE)) + MAP_Y;
+      ctx.beginPath();
+      ctx.moveTo(rx, ry);
+      ctx.lineTo(rx - 1, ry + 6);
+      ctx.stroke();
+    }
+  }
+
+  if (w.id === 'foggy') {
+    ctx.fillStyle = 'rgba(180,190,200,0.06)';
+    ctx.fillRect(MAP_X, MAP_Y, GRID_COLS * CELL_SIZE, GRID_ROWS * CELL_SIZE);
+    for (let i = 0; i < 8; i++) {
+      const fx = MAP_X + ((i * 197 + frameCount * 0.3) % (GRID_COLS * CELL_SIZE));
+      const fy = MAP_Y + ((i * 311 + frameCount * 0.2) % (GRID_ROWS * CELL_SIZE));
+      const grad = ctx.createRadialGradient(fx, fy, 0, fx, fy, CELL_SIZE * 2);
+      grad.addColorStop(0, 'rgba(200,210,220,0.08)');
+      grad.addColorStop(1, 'rgba(200,210,220,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(MAP_X, MAP_Y, GRID_COLS * CELL_SIZE, GRID_ROWS * CELL_SIZE);
+    }
+  }
+
+  if (w.id === 'heatwave') {
+    ctx.fillStyle = 'rgba(255,100,30,0.04)';
+    ctx.fillRect(MAP_X, MAP_Y, GRID_COLS * CELL_SIZE, GRID_ROWS * CELL_SIZE);
+  }
+}
+
+// ============================================================
+// 🌊 RENDER: WAVE TRANSITION
+// ============================================================
+function drawWaveTransition() {
+  if (game.waveTransition <= 0) return;
+  const alpha = Math.min(1, game.waveTransition / 30);
+  const scale = 0.5 + (1 - game.waveTransition / 90) * 1.5;
+  const alpha2 = Math.min(1, (90 - game.waveTransition) / 30);
+
+  ctx.save();
+  ctx.globalAlpha = alpha * alpha2;
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE * 1.2 * scale}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(game.waveTransitionText || `第 ${game.wave} 波`, canvas.width / 2, canvas.height / 2);
+  ctx.restore();
+}
+
+// ============================================================
+// 🏆 RENDER: ACHIEVEMENT POPUP
+// ============================================================
+function drawAchievementPopup() {
+  if (!game.achievementPopup) return;
+  const popup = game.achievementPopup;
+  popup.timer -= deltaTime;
+  if (popup.timer <= 0) { game.achievementPopup = null; return; }
+
+  const alpha = Math.min(1, popup.timer / 30, (120 - popup.timer) / 30);
+  const pw = CELL_SIZE * 6;
+  const ph = CELL_SIZE * 1.5;
+  const px = canvas.width / 2 - pw / 2;
+  const py = canvas.height * 0.15;
+
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(20,15,30,0.95)';
+  ctx.strokeStyle = '#ffdd00';
+  ctx.lineWidth = 2;
+  roundRect(px, py, pw, ph, 10);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = `bold ${CELL_SIZE * 0.3}px 'Microsoft YaHei'`;
+  ctx.textAlign = 'center';
+  ctx.fillText(`🏆 成就解锁！${popup.ach.icon} ${popup.ach.name}`, canvas.width / 2, py + ph * 0.4);
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = `${CELL_SIZE * 0.22}px 'Microsoft YaHei'`;
+  ctx.fillText(popup.ach.desc, canvas.width / 2, py + ph * 0.72);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// INPUT HANDLING
+// ============================================================
+canvas.addEventListener('mousemove', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX-rect.left)*(canvas.width/rect.width);
+  mouseY = (e.clientY-rect.top)*(canvas.height/rect.height);
+  game.hoveredCell = posToCell(mouseX, mouseY);
+});
+
+canvas.addEventListener('click', (e)=>{
+  initAudio();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX-rect.left)*(canvas.width/rect.width);
+  const my = (e.clientY-rect.top)*(canvas.height/rect.height);
+  handleClick(mx, my);
+});
+
+canvas.addEventListener('contextmenu', (e)=>{
+  e.preventDefault();
+  initAudio();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX-rect.left)*(canvas.width/rect.width);
+  const my = (e.clientY-rect.top)*(canvas.height/rect.height);
+  handleRightClick(mx, my);
+});
+
+canvas.addEventListener('dblclick', (e)=>{
+  initAudio();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX-rect.left)*(canvas.width/rect.width);
+  const my = (e.clientY-rect.top)*(canvas.height/rect.height);
+  const cell = posToCell(mx, my);
+  if(cell){
+    const tower = getTowerAt(cell.col, cell.row);
+    if(tower){ sellTower(tower); game.towerMenu=null; }
+    else { game.towerMenu=null; }
+  }
+});
+
+document.addEventListener('keydown', (e)=>{
+  initAudio();
+  if(gameState === GS.SKILL_SELECT){
+    if(e.key==='1' && game.skillChoices[0]){ applySkill(game.skillChoices[0]); gameState=GS.PLAYING; sfxClick(); }
+    if(e.key==='2' && game.skillChoices[1]){ applySkill(game.skillChoices[1]); gameState=GS.PLAYING; sfxClick(); }
+    if(e.key==='3' && game.skillChoices[2]){ applySkill(game.skillChoices[2]); gameState=GS.PLAYING; sfxClick(); }
+    return;
+  }
+  if(e.key==='Escape'){
+    game.towerMenu = null;
+    game.selectedTowerType = -1;
+    if(gameState===GS.PAUSED) gameState=GS.PLAYING;
+  }
+  if(e.key==='p'||e.key==='P'){
+    if(gameState===GS.PLAYING) gameState=GS.PAUSED;
+    else if(gameState===GS.PAUSED) gameState=GS.PLAYING;
+  }
+  if(e.key===' '||e.key==='Spacebar'){
+    e.preventDefault();
+    if(gameState===GS.PLAYING && !game.waveActive) startWave();
+  }
+  // Number keys for tower selection
+  if(gameState===GS.PLAYING){
+    if(e.key>='1'&&e.key<='5'){
+      const idx = parseInt(e.key)-1;
+      game.selectedTowerType = (game.selectedTowerType===idx) ? -1 : idx;
+      game.towerMenu = null;
+    }
+    // 🔥 Active skill hotkeys
+    if(e.key==='q'||e.key==='Q') useActiveSkill(0);
+    if(e.key==='w'||e.key==='W') useActiveSkill(1);
+    if(e.key==='e'||e.key==='E') useActiveSkill(2);
+  }
+});
+
+function handleClick(mx, my){
+  if(gameState === GS.MENU || gameState === GS.LEVEL_SELECT){
+    // Check level card clicks
+    const cardW = Math.min(canvas.width*0.26, 200);
+    const cardH = cardW*1.45;
+    const gap = cardW*0.15;
+    const totalW = 3*cardW + 2*gap;
+    const startX = canvas.width/2 - totalW/2;
+    const cardY = canvas.height*0.28;
+    for(let i=0;i<3;i++){
+      const cx = startX + i*(cardW+gap);
+      if(mx>=cx && mx<=cx+cardW && my>=cardY && my<=cardY+cardH){
+        initLevel(i);
+        gameState = GS.PLAYING;
+        sfxClick();
+        return;
+      }
+    }
+    return;
+  }
+
+  // 🦸 Hero selection panel click
+  if(gameState === GS.PLAYING && !game.heroSelected && game.wave===0){
+    const panelW2 = Math.min(canvas.width*0.8, 640);
+    const panelH2 = CELL_SIZE*5;
+    const px2 = canvas.width/2-panelW2/2;
+    const py2 = canvas.height/2-panelH2/2;
+    const cardW2 = panelW2*0.22;
+    const cardH2 = panelH2*0.6;
+    const cardGap2 = panelW2*0.02;
+    const totalCardW2 = 4*cardW2+3*cardGap2;
+    const cardStartX2 = px2+(panelW2-totalCardW2)/2;
+    const cardY2 = py2+panelH2-cardH2-CELL_SIZE*0.4;
+    for(let i=0;i<4;i++){
+      const cx2 = cardStartX2+i*(cardW2+cardGap2);
+      if(mx>=cx2&&mx<=cx2+cardW2&&my>=cardY2&&my<=cardY2+cardH2){
+        initHero(i);
+        sfxClick();
+        return;
+      }
+    }
+    if(my<py2||my>py2+panelH2||mx<px2||mx>px2+panelW2){
+      initHero(0);
+      sfxClick();
+      return;
+    }
+    return;
+  }
+
+  if(gameState === GS.GAME_OVER || gameState === GS.VICTORY){
+    const pw = Math.min(canvas.width*0.7, 500);
+    const ph = CELL_SIZE*5.5;
+    const px = canvas.width/2 - pw/2;
+    const py = canvas.height/2 - ph/2;
+    const bW = pw*0.35, bH = CELL_SIZE*0.9;
+    const bY = py + ph - bH - CELL_SIZE*1.2;
+    // Retry / Endless mode
+    if(mx>=px+pw*0.1 && mx<=px+pw*0.1+bW && my>=bY && my<=bY+bH){
+      if(gameState===GS.VICTORY && game.wave>=game.totalWaves && !game.isEndless){
+        startEndlessMode();
+      } else {
+        initLevel(currentLevel);
+        gameState = GS.PLAYING;
+      }
+      sfxClick();
+      return;
+    }
+    // Level select
+    if(mx>=px+pw*0.55 && mx<=px+pw*0.55+bW && my>=bY && my<=bY+bH){
+      gameState = GS.LEVEL_SELECT;
+      sfxClick();
+      return;
+    }
+    return;
+  }
+
+  if(gameState === GS.PAUSED) return;
+
+  // Skill panel
+  if(gameState === GS.SKILL_SELECT && game.skillPanelVisible){
+    const panelW = Math.min(canvas.width*0.85, 700);
+    const px = canvas.width/2 - panelW/2;
+    const py = canvas.height/2 - CELL_SIZE*5/2;
+    const cardW = panelW*0.28;
+    const cardH = CELL_SIZE*5*0.55;
+    const cardGap = panelW*0.03;
+    const cardStartX = px + (panelW - 3*cardW - 2*cardGap)/2;
+    const cardY = py + CELL_SIZE*5 - cardH - CELL_SIZE*0.3;
+    for(let i=0;i<3;i++){
+      const cx = cardStartX + i*(cardW+cardGap);
+      if(mx>=cx && mx<=cx+cardW && my>=cardY && my<=cardY+cardH){
+        if(game.skillChoices[i]){
+          applySkill(game.skillChoices[i]);
+          gameState = GS.PLAYING;
+          sfxClick();
+        }
+        return;
+      }
+    }
+    return;
+  }
+
+  if(gameState !== GS.PLAYING) return;
+
+  // 🔥 Active skill button click
+  const btnSize = CELL_SIZE*1.2;
+  const gap = 6;
+  const startX = canvas.width - btnSize - 12;
+  const startY = canvas.height - btnSize*3 - gap*2 - 15;
+  for(let i=0;i<3;i++){
+    const bx = startX;
+    const by = startY + i*(btnSize+gap);
+    if(mx>=bx && mx<=bx+btnSize && my>=by && my<=by+btnSize){
+      useActiveSkill(i);
+      return;
+    }
+  }
+
+  // Wave button
+  const bw = CELL_SIZE*3.5, bh = CELL_SIZE*1.2;
+  const bx = canvas.width - bw - 15;
+  const by = 62;
+  if(!game.waveActive && mx>=bx && mx<=bx+bw && my>=by && my<=by+bh){
+    if(game.wave >= game.totalWaves) return;
+    startWave();
+    sfxClick();
+    return;
+  }
+
+  // Tower menu click
+  if(game.towerMenu){
+    const {col, row} = game.towerMenu;
+    const cx = MAP_X + col*CELL_SIZE + CELL_SIZE/2;
+    const cy = MAP_Y + row*CELL_SIZE + CELL_SIZE/2;
+    const menuW = CELL_SIZE*4.5;
+    const menuH = CELL_SIZE*3.5;
+    let menuX = cx - menuW/2;
+    let menuY = cy - menuH - 10;
+    if(menuY < MAP_Y) menuY = cy + 15;
+    if(menuX < MAP_X) menuX = MAP_X + 5;
+    if(menuX+menuW > MAP_X+GRID_COLS*CELL_SIZE) menuX = MAP_X+GRID_COLS*CELL_SIZE-menuW-5;
+    const iconSize = CELL_SIZE*0.7;
+    const startX = menuX + (menuW - 5*iconSize - 4*8)/2;
+    const iy = menuY + CELL_SIZE*0.75;
+    for(let i=0;i<5;i++){
+      const ix = startX + i*(iconSize+8);
+      if(mx>=ix && mx<=ix+iconSize && my>=iy && my<=iy+iconSize+CELL_SIZE*0.6){
+        if(placeTower(col, row, i)){
+          game.towerMenu = null;
+        }
+        return;
+      }
+    }
+    game.towerMenu = null;
+    return;
+  }
+
+  // Tower shortcut bar
+  const barY = 62;
+  const barH = CELL_SIZE*1.1;
+  const barW = TOWER_TYPES.length*(CELL_SIZE*1.1+4)+4;
+  const barX = canvas.width/2 - barW/2;
+  if(my >= barY && my <= barY+barH+8){
+    for(let i=0;i<TOWER_TYPES.length;i++){
+      const tx = barX + 4 + i*(CELL_SIZE*1.1+4);
+      if(mx>=tx && mx<=tx+CELL_SIZE*1.1 && my>=barY+4 && my<=barY+4+barH){
+        game.selectedTowerType = (game.selectedTowerType===i) ? -1 : i;
+        game.towerMenu = null;
+        sfxClick();
+        return;
+      }
+    }
+  }
+
+  // 🔥 Airstrike targeting
+  if(game.airstrikeTargeting){
+    executeAirstrike(mx, my);
+    return;
+  }
+
+  // Map click
+  const cell = posToCell(mx, my);
+  if(!cell) return;
+
+  // 🎁 Click on dropped item
+  for(const item of game.droppedItems){
+    if(Math.abs(mx-item.x)<14 && Math.abs(my-item.y)<14){
+      pickupItem(item);
+      item.dead = true;
+      return;
+    }
+  }
+
+  // 🦸 Hero movement - click empty cell to move hero
+  if(game.hero && game.heroSelected && !game.hero.dead && game.selectedTowerType<0){
+    if(!isPathCell(cell.col, cell.row) || game.waveActive){
+      const pos = cellCenter(cell.col, cell.row);
+      game.heroTargetX = pos.x;
+      game.heroTargetY = pos.y;
+      if(game.towerMenu){ game.towerMenu = null; }
+      return;
+    }
+  }
+
+  // Click on existing tower → info/upgrade
+  const tower = getTowerAt(cell.col, cell.row);
+  if(tower){
+    if(game.selectedTowerType >= 0){
+      if(tower.type === game.selectedTowerType){
+        upgradeTower(tower);
+      }
+    } else {
+      upgradeTower(tower);
+    }
+    return;
+  }
+
+  // Click on buildable cell
+  if(isBuildable(cell.col, cell.row)){
+    if(game.selectedTowerType >= 0){
+      placeTower(cell.col, cell.row, game.selectedTowerType);
+    } else {
+      game.towerMenu = {col: cell.col, row: cell.row};
+    }
+    return;
+  }
+}
+
+function handleRightClick(mx, my){
+  if(gameState !== GS.PLAYING) return;
+  const cell = posToCell(mx, my);
+  if(!cell) return;
+  const tower = getTowerAt(cell.col, cell.row);
+  if(tower){
+    sellTower(tower);
+    game.towerMenu = null;
+  } else {
+    game.towerMenu = null;
+    game.selectedTowerType = -1;
+  }
+}
+
+// Touch support
+canvas.addEventListener('touchstart', (e)=>{
+  e.preventDefault();
+  initAudio();
+  if(e.touches.length===1){
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.touches[0].clientX-rect.left)*(canvas.width/rect.width);
+    const my = (e.touches[0].clientY-rect.top)*(canvas.height/rect.height);
+    mouseX = mx; mouseY = my;
+    game.hoveredCell = posToCell(mx, my);
+    // Long press for right click
+    game._touchStartTime = Date.now();
+    game._touchStartPos = {x: mx, y: my};
+  }
+});
+
+canvas.addEventListener('touchend', (e)=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.changedTouches[0].clientX-rect.left)*(canvas.width/rect.width);
+  const my = (e.changedTouches[0].clientY-rect.top)*(canvas.height/rect.height);
+  const dt = Date.now() - (game._touchStartTime||0);
+  const dx = mx - ((game._touchStartPos||{}).x||mx);
+  const dy = my - ((game._touchStartPos||{}).y||my);
+  if(dt > 500 && Math.abs(dx)<5 && Math.abs(dy)<5){
+    handleRightClick(mx, my);
+  } else {
+    handleClick(mx, my);
+  }
+});
+
+// ============================================================
+// MAIN GAME LOOP
+// ============================================================
+let lastTime = performance.now();
+let MAP_HEIGHT = 0;
+
+function setupLayout(){
+  CELL_SIZE = Math.floor(Math.min(
+    (canvas.width * 0.85) / GRID_COLS,
+    (canvas.height - 120) / GRID_ROWS
+  ));
+  CELL_SIZE = Math.max(28, Math.min(50, CELL_SIZE));
+  MAP_HEIGHT = GRID_ROWS * CELL_SIZE;
+  MAP_X = Math.floor((canvas.width - GRID_COLS * CELL_SIZE) / 2);
+  MAP_Y = Math.floor(70 + (canvas.height - 70 - MAP_HEIGHT) / 2);
+}
+
+function gameLoop(timestamp){
+  deltaTime = Math.min(50, timestamp - lastTime);
+  lastTime = timestamp;
+  frameCount++;
+
+  setupLayout();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if(gameState === GS.LEVEL_SELECT || gameState === GS.MENU){
+    gameState = GS.LEVEL_SELECT;
+    drawLevelSelect();
+  } else if(gameState === GS.PLAYING || gameState === GS.PAUSED || gameState === GS.SKILL_SELECT){
+    // Screen shake
+    const shake = gameState===GS.PLAYING ? getShakeOffset() : {x:0,y:0};
+    ctx.save();
+    ctx.translate(shake.x, shake.y);
+
+    drawWeatherEffects();
+    drawMap();
+    drawDroppedItems();
+    drawTowers();
+    drawEnemies();
+    drawBullets();
+    drawParticles();
+    drawDamageNumbers();
+    drawHero();
+    drawTowerMenu();
+    drawSkillsList();
+    drawHUD();
+    drawWaveButton();
+    drawBossWarning();
+    drawActiveSkillButtons();
+    drawWaveTransition();
+    drawAchievementPopup();
+    drawHeroSelection();
+
+    ctx.restore();
+
+    if(gameState === GS.SKILL_SELECT){
+      drawSkillPanel();
+    }
+
+    if(gameState === GS.PAUSED){
+      drawPauseOverlay();
+    }
+
+    // Show selected tower info
+    if(game.hoveredCell && gameState===GS.PLAYING && !game.airstrikeTargeting){
+      const tower = getTowerAt(game.hoveredCell.col, game.hoveredCell.row);
+      if(tower) drawTowerInfo(tower);
+    }
+
+    // Update game logic
+    if(gameState === GS.PLAYING){
+      updateSpawning();
+      updateTowers();
+      updateBullets();
+      updateEnemies();
+      updateParticles();
+      updateDamageNumbers();
+      updateHero();
+      updateDroppedItems();
+      updateActiveSkills();
+      updateScreenShake();
+
+      // Wave transition timer
+      if(game.waveTransition > 0) game.waveTransition -= deltaTime;
+
+      // Prep timer
+      if(!game.waveActive && game.prepTimer > 0){
+        game.prepTimer -= deltaTime;
+      }
+
+      // Check game over
+      if(game.lives <= 0 && game.shieldActive <= 0){
+        gameState = GS.GAME_OVER;
+        sfxGameOver();
+        if(game.score > saveData.scores[currentLevel]) saveData.scores[currentLevel] = game.score;
+        if(game.wave > saveData.waves[currentLevel]) saveData.waves[currentLevel] = game.wave;
+        if(game.isEndless && game.wave > (saveData.endlessBest||0)){ saveData.endlessBest = game.wave; }
+        saveSave(saveData);
+      }
+    }
+  }
+
+  if(gameState === GS.GAME_OVER || gameState === GS.VICTORY){
+    drawMap();
+    drawTowers();
+    drawEnemies();
+    drawBullets();
+    drawParticles();
+    drawHUD();
+    drawGameOverPanel();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ============================================================
+// START
+// ============================================================
+gameState = GS.LEVEL_SELECT;
+setupLayout();
+initLevel(0); // Default init for layout
+requestAnimationFrame(gameLoop);
+
+console.log('🧟 僵尸防线 - Zombie Defense TD');
+console.log('塔防 + Roguelike 技能系统');
+console.log('🖱️ 左键: 建造/选择 | 右键/双击: 出售');
+console.log('⌨️ 1-5: 选择塔 | 空格: 开始波次 | ESC: 取消 | P: 暂停');
+</script>
+</body>
+</html>
