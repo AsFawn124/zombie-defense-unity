@@ -78,26 +78,31 @@ Page({
   },
   
   onTouchEnd(e) {
+    // Clear any pending long press timer
     if (longPressTimer) {
       clearTimeout(longPressTimer);
       longPressTimer = null;
-      const now = Date.now();
-      const mx = mouseX;
-      const my = mouseY;
-      // Double tap detection (for sell)
-      if (now - lastTapTime < 300) {
-        const cell = posToCell(mx, my);
-        if (cell) {
-          const tower = getTowerAt(cell.col, cell.row);
-          if (tower) { sellTower(tower); game.towerMenu = null; sfxClick(); }
-          else { game.towerMenu = null; }
-        }
-        lastTapTime = 0;
-        return;
-      }
-      lastTapTime = now;
-      if (typeof handleClick === 'function') handleClick(mx, my);
     }
+    
+    const now = Date.now();
+    const mx = mouseX;
+    const my = mouseY;
+    
+    // Double tap detection (for sell)
+    if (now - lastTapTime < 300) {
+      const cell = posToCell(mx, my);
+      if (cell) {
+        const tower = getTowerAt(cell.col, cell.row);
+        if (tower) { sellTower(tower); game.towerMenu = null; sfxClick(); }
+        else { game.towerMenu = null; }
+      }
+      lastTapTime = 0;
+      return;
+    }
+    lastTapTime = now;
+    
+    // Normal click
+    if (typeof handleClick === 'function') handleClick(mx, my);
   },
   
   onUnload() {
