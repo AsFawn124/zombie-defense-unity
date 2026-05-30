@@ -1,0 +1,11 @@
+{
+  "pages": [
+    "pages/game/game"
+  ],
+  "window": {
+    "navigationStyle": "custom",
+    "backgroundTextStyle": "dark",
+    "navigationBarBackgroundColor": "#0a0a0a",
+    "navigationBarTitleText": "僵尸防线"
+  }
+}
