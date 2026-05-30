@@ -1920,7 +1920,8 @@ function drawGameOverPanel(){
     roundRect(ebX, ebY, ebW, ebH, 8);
     ctx.fill();
     ctx.fillStyle = '#fff';
-    ctx.font = ;
+    ctx.font = `${CELL_SIZE*0.22}px 'Microsoft YaHei'`;
+    ctx.textAlign = 'center';
     ctx.fillText('♾️ 进入无尽模式', ebX+ebW/2, ebY+ebH/2+4);
   }
 
